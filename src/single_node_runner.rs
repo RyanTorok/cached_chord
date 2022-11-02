@@ -2,15 +2,20 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap};
 use std::collections::btree_map::BTreeMap;
+use rand::Rng;
 use tokio::sync::mpsc;
-use crate::{Address, CacheType, ContentId, Distribution, MASTER_NODE, NodeId, RequestId};
+use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::Receiver;
+use crate::{Address, CacheType, ContentId, ContentStub, Distribution, MASTER_NODE, NodeId, RequestId};
 use crate::chord::{FindResult, Node};
 use crate::message::{ChordMessage, FutureValue, MessageContent};
+use rand::distributions::Distribution as RngDistribution;
 
 pub const BUFFER_SIZE: usize = 128;
 
 pub struct SingleNodeRunner {
     node: Node,
+    keys: u64,
     request_map: HashMap<ContentId, Vec<FutureValue>>,
     // Used only for Master
     successor_table: BTreeMap<NodeId, (Address, (NodeId, Address))>,
@@ -22,11 +27,14 @@ pub struct SingleNodeRunner {
 }
 
 impl SingleNodeRunner {
-    pub fn new(n: u32, cache: CacheType, cache_size: usize, requests: RequestId, distribution: Distribution, zipf_param: f64) -> SingleNodeRunner {
-        let ip = Default::default(); // TODO
-        let (outgoing, incoming) = mpsc::channel(BUFFER_SIZE);
-        SingleNodeRunner {
-            node: Node::new(n, ip),
+    pub fn new(n: u32, address: Address, keys: u64, cache: CacheType, cache_size: usize, requests: RequestId, distribution: Distribution, zipf_param: f64) -> (SingleNodeRunner, Sender<ChordMessage>, Receiver<ChordMessage>) {
+        let (in_tx, incoming) = mpsc::channel(BUFFER_SIZE);
+        let (outgoing, out_rx) = mpsc::channel(BUFFER_SIZE);
+        let mut node = Node::new(n, address);
+        node.init_cache(cache, cache_size);
+        (SingleNodeRunner {
+            node,
+            keys,
             request_map: HashMap::new(),
             successor_table: BTreeMap::new(),
             incoming,
@@ -34,16 +42,49 @@ impl SingleNodeRunner {
             requests,
             distribution,
             zipf_param,
-        }
+        }, in_tx, out_rx)
     }
 }
 
-#[tokio::main]
-pub async fn run_single_node(r: SingleNodeRunner) {
-    run_single_node_inner(r).await
+fn split_u64(n: u64) -> (NodeId, ContentStub) {
+    let bytes = u64::to_be_bytes(n);
+    let mut node_id = [0u8; 4];
+    for i in 0..4 {
+        node_id[i] = bytes[i];
+    }
+    let mut node_offset = [0u8; 4];
+    for i in 0..4 {
+        node_offset[i] = bytes[i + 4];
+    }
+    (u32::from_be_bytes(node_id), u32::from_be_bytes(node_offset))
 }
 
-pub async fn run_single_node_inner(mut r: SingleNodeRunner) {
+// Submits requests for keys to a single nade according to the given distribution
+pub async fn run_requests(requests: u64, keys: u64, node_addr: Address, tx: mpsc::Sender<ChordMessage>, dist: Distribution, zipf_param: f64) {
+    for request_id in 0..requests {
+        let sink = FutureValue::new();
+        tx.send(ChordMessage::new((u32::MAX, u32::MAX),node_addr, MessageContent::NewRequest(
+            match dist {
+                Distribution::Uniform => {
+                    // ThreadRng is not `Send` because it relies on thread-specific mechanics,
+                    // so we need a new handle each time so no ThreadRng instance crosses an `await`.
+                    let mut rng = rand::thread_rng();
+                    split_u64(rng.gen_range(0..keys))
+                }
+                Distribution::Zipf => {
+                    let mut rng = rand::thread_rng();
+                    let zipf = zipf::ZipfDistribution::new(keys.try_into().expect("Number of keys too large for CPU registers."), zipf_param).expect("Error setting up Zipf distribution.");
+                    split_u64(zipf.sample(&mut rng).try_into().expect("Zipf sample too large for a u64."))
+                }
+            },
+            sink
+        ))).await // Await because we don't want to send the next request until this one actually gets added to the send queue.
+            .expect("Tokio send error when sending the request.")
+    }
+}
+
+pub async fn run_node(mut r: SingleNodeRunner) {
+    tokio::spawn(run_requests(r.requests, r.keys, r.node.address(), r.outgoing.clone(), r.distribution, r.zipf_param));
     let r = &mut r;
     loop {
         match r.incoming.recv().await {
@@ -69,7 +110,8 @@ pub async fn run_single_node_inner(mut r: SingleNodeRunner) {
                                 }
                             }
                             FindResult::Redirect(next) => {
-                                if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), next, MessageContent::Find(key))).await {
+                                let src = r.node.msg_id();
+                                if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(key))).await {
                                     eprintln!("Error: Could not send Find message because of error '{}'", e);
                                 }
                             }
@@ -80,7 +122,8 @@ pub async fn run_single_node_inner(mut r: SingleNodeRunner) {
                     },
                     MessageContent::Find(key) => {
                         // Find the key (returns either the value or a redirect address), and send that back
-                        if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), msg.src.1, MessageContent::FindResponse(key, r.node.next_finger(key)))).await {
+                        let src = r.node.msg_id();
+                        if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::FindResponse(key, r.node.next_finger(key)))).await {
                             eprintln!("Error: Could not send FindResponse message because of error '{}'", e);
                         }
                     },
@@ -91,9 +134,12 @@ pub async fn run_single_node_inner(mut r: SingleNodeRunner) {
                                 if let Some(futures) = r.request_map.remove(&key) {
                                     futures.into_iter().for_each(|mut f| f.complete(val));
                                 }
+                                // Put the key into our cache
+                                r.node.cache_key(key, msg.src.1)
                             }
                             FindResult::Redirect(next) => {
-                                if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), next, MessageContent::Find(key))).await {
+                                let src = r.node.msg_id();
+                                if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(key))).await {
                                     eprintln!("Error: Could not send Find message because of error '{}'", e);
                                 }
                             }
@@ -133,7 +179,8 @@ pub async fn run_single_node_inner(mut r: SingleNodeRunner) {
                             r.successor_table.insert(p_node, (p_addr, msg.src));
 
                             // Tell the sender who its successor is
-                            if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), msg.src.1, MessageContent::JoinToMasterResponse(s_node, s_addr))).await {
+                            let src = r.node.msg_id();
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::JoinToMasterResponse(s_node, s_addr))).await {
                                 eprintln!("Error: Could not send JoinToMasterResponse message because of error '{}'", e);
                             }
                         }
@@ -142,7 +189,8 @@ pub async fn run_single_node_inner(mut r: SingleNodeRunner) {
                         // Mark the new node as our successor
                         r.node.add_successor((s_node, s_addr));
                         // Tell new successor about us
-                        if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), s_addr, MessageContent::JoinToSuccessor)).await {
+                        let src = r.node.msg_id();
+                        if let Err(e) = r.outgoing.send(ChordMessage::new(src, s_addr, MessageContent::JoinToSuccessor)).await {
                             eprintln!("Error: Could not send JoinToSuccessor message because of error '{}'", e);
                         }
                     }
@@ -156,16 +204,19 @@ pub async fn run_single_node_inner(mut r: SingleNodeRunner) {
                     MessageContent::SuccessorHeartbeat => {
                         // Check if we have a later predecessor than the node that thinks we're
                         // its successor
-                        match r.node.predecessor() {
+                        let opt_predecessor = r.node.predecessor();
+                        match opt_predecessor {
                             Some((pre_node, pre_addr)) => {
                                 if pre_node != msg.src.0 { // Could go up or down if nodes join/leave the network
                                     // Update the sender to the new in-between node
-                                    if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), msg.src.1, MessageContent::SuccessorHeartbeatNewSuccessor(pre_node, pre_addr))).await {
+                                    let src = r.node.msg_id();
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::SuccessorHeartbeatNewSuccessor(pre_node, pre_addr))).await {
                                         eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
                                     }
                                 } else {
                                     // Still the same predecessor
-                                    if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), msg.src.1, MessageContent::SuccessorHeartbeatAck)).await {
+                                    let src = r.node.msg_id();
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::SuccessorHeartbeatAck)).await {
                                         eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
                                     }
                                 }

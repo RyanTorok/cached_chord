@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use crate::cache::{Cache, CacheStats, Entry};
-use crate::{Address, NodeId};
+use crate::{Address, ContentId};
 
 pub struct MruCache {
     capacity: usize,
@@ -22,7 +22,7 @@ impl MruCache {
 
 impl Cache for MruCache {
 
-    fn get(&mut self, id: NodeId) -> Option<Address> {
+    fn get(&mut self, id: ContentId) -> Option<Address> {
         let index = self.store.iter().position(|ent| ent.0.eq(&id))?;
         let entry = self.store.remove(index).expect("unreachable");
         let addr = entry.1.clone();
@@ -30,7 +30,7 @@ impl Cache for MruCache {
         Some(addr)
     }
 
-    fn set(&mut self, id: NodeId, address: Address) {
+    fn set(&mut self, id: ContentId, address: Address) {
         while self.size >= self.capacity {
             self.store.pop_back();
         }

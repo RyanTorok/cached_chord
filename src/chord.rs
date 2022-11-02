@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use crate::cache::{Cache, make_cache};
+use crate::cache::{Cache, make_cache, default_cache};
 use crate::{NodeId, Address, ContentId, ContentStub, Value, SUCCESSORS};
+use serde::{Serialize, Deserialize};
 
 pub struct Node {
     id: NodeId,
@@ -10,9 +11,10 @@ pub struct Node {
     successors: BTreeSet<(NodeId, Address)>,
     predecessor: Option<(NodeId, Address)>,
     store: HashMap<ContentStub, Value>,
-    cache: Option<Box<dyn Cache>>,
+    cache: Box<dyn Cache + Send>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub enum FindResult {
     Value(Value),
     Redirect(Address),
@@ -22,7 +24,7 @@ pub enum FindResult {
 impl Node {
     pub fn new(id: NodeId, address: Address) -> Node {
         Node {
-            id, address, finger_table: BTreeMap::new(), successors: BTreeSet::new(), predecessor: None, store: Default::default(), cache: None
+            id, address, finger_table: BTreeMap::new(), successors: BTreeSet::new(), predecessor: None, store: Default::default(), cache: Box::new(default_cache())
         }
     }
 
@@ -38,12 +40,17 @@ impl Node {
         (self.id(), self.address())
     }
 
-    pub fn next_finger(&self, target: ContentId) -> FindResult {
+    // This function takes &mut self because it allows us to avoid using a RefCell inside the caches
+    // that update internal state on a read (e.g. LRU)
+    pub fn next_finger(&mut self, target: ContentId) -> FindResult {
         if target.0 == self.id {
             match self.store.get(&target.1) {
                 None => FindResult::Error("No such object.".to_string()),
                 Some(val) => FindResult::Value(*val)
             }
+        } else if let Some(addr) = self.cache.get(target) {
+            // Cache hit -- redirect straight to the node that has the key
+            FindResult::Redirect(addr)
         } else {
             match self.finger_table.iter().rev().find(|ent| *ent.0 < target.0) {
                 None => FindResult::Error("No available finger pointer.".to_string()),
@@ -80,20 +87,17 @@ impl Node {
     }
 
     pub fn init_cache(&mut self, cache_type: CacheType, size: usize) {
-        self.cache = Some(make_cache(cache_type, size));
+        self.cache = make_cache(cache_type, size);
     }
 
-    pub fn cache(&self) -> &Option<Box<dyn Cache>> {
-        &self.cache
-    }
-
-    pub fn cache_mut(&mut self) -> &mut Option<Box<dyn Cache>> {
-        &mut self.cache
+    pub fn cache_key(&mut self, key: ContentId, addr: Address) {
+        self.cache.set(key, addr);
     }
 }
 
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
 pub enum CacheType {
+    None,
     LRU,
     MRU,
     FIFO,
@@ -101,7 +105,7 @@ pub enum CacheType {
     LFU
 }
 
-#[derive(clap::ValueEnum, Clone, Debug)]
+#[derive(clap::ValueEnum, Clone, Debug, Copy)]
 pub enum Distribution {
     Uniform,
     Zipf

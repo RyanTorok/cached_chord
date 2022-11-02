@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap};
 use crate::cache::{Cache, CacheStats, Entry};
-use crate::{Address, NodeId};
+use crate::{Address, ContentId};
 
 #[derive(Eq, Ord, Clone, Copy)]
 struct RankedEntry(u64, Entry);
@@ -37,14 +37,14 @@ impl LfuCache {
 }
 
 impl Cache for LfuCache {
-    fn get(&mut self, id: NodeId) -> Option<Address> {
+    fn get(&mut self, id: ContentId) -> Option<Address> {
         let ent = *self.store.iter().find(|ent| (*ent).1.0 == id)?;
         self.store.retain(|e| ent.1.0 != e.1.0);
         self.store.push(RankedEntry(ent.0 + 1, (ent.1.0, ent.1.1)));
         Some(ent.1.1)
     }
 
-    fn set(&mut self, id: NodeId, address: Address) {
+    fn set(&mut self, id: ContentId, address: Address) {
         self.store.push(RankedEntry(0, (id, address)))
     }
 }
