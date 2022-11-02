@@ -1,5 +1,5 @@
 use rand::seq::index::sample;
-use crate::{CacheType, Distribution, SUCCESSORS};
+use crate::{CacheType, Distribution};
 use crate::chord::Node;
 
 pub struct Simulation {
@@ -18,9 +18,7 @@ impl Simulation {
             let next_id: usize = *rand_indices.next().expect("Not enough IDs. This is a bug.");
             let i = next_id.try_into().expect("Node ID too big. This is a bug.");
             // Since this is just a simulation, we can just use the node ID as an address.
-            let mut node = Node::new(
-                i, i.into(),
-                SUCCESSORS);
+            let mut node = Node::new(i, i.into());
             node.init_cache(cache, cache_size);
             nodes.push(node);
         }

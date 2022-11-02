@@ -3,7 +3,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap};
 use std::collections::btree_map::BTreeMap;
 use tokio::sync::mpsc;
-use crate::{Address, CacheType, ContentId, Distribution, MASTER_NODE, NodeId, RequestId, SUCCESSORS};
+use crate::{Address, CacheType, ContentId, Distribution, MASTER_NODE, NodeId, RequestId};
 use crate::chord::{FindResult, Node};
 use crate::message::{ChordMessage, FutureValue, MessageContent};
 
@@ -26,7 +26,7 @@ impl SingleNodeRunner {
         let ip = Default::default(); // TODO
         let (outgoing, incoming) = mpsc::channel(BUFFER_SIZE);
         SingleNodeRunner {
-            node: Node::new(n, ip, SUCCESSORS),
+            node: Node::new(n, ip),
             request_map: HashMap::new(),
             successor_table: BTreeMap::new(),
             incoming,
@@ -149,20 +149,35 @@ pub async fn run_single_node_inner(mut r: SingleNodeRunner) {
                     MessageContent::JoinToSuccessor => {
                         // We have a new predecessor
                         let old_p = r.node.predecessor();
-                        r.node.set_predecessor(msg.src)
+                        r.node.set_predecessor(msg.src);
 
-                    },
-                    MessageContent::JoinToSuccessorAck => {
 
                     },
                     MessageContent::SuccessorHeartbeat => {
-
+                        // Check if we have a later predecessor than the node that thinks we're
+                        // its successor
+                        match r.node.predecessor() {
+                            Some((pre_node, pre_addr)) => {
+                                if pre_node != msg.src.0 { // Could go up or down if nodes join/leave the network
+                                    // Update the sender to the new in-between node
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), msg.src.1, MessageContent::SuccessorHeartbeatNewSuccessor(pre_node, pre_addr))).await {
+                                        eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
+                                    }
+                                } else {
+                                    // Still the same predecessor
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(r.node.msg_id(), msg.src.1, MessageContent::SuccessorHeartbeatAck)).await {
+                                        eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
+                                    }
+                                }
+                            }
+                            None => {
+                                eprintln!("Error: Node should not have no predecessor if it receives a heartbeat message from a current or former predecessor.");
+                            }
+                        };
                     },
-                    MessageContent::SuccessorHeartbeatAck => {
-
-                    },
-                    MessageContent::SuccessorHeartbeatNewSuccessor(..) => {
-
+                    MessageContent::SuccessorHeartbeatAck => {}, // This is a No-op
+                    MessageContent::SuccessorHeartbeatNewSuccessor(s_node, s_addr) => {
+                        r.node.add_successor((s_node, s_addr))
                     }
                 }
             }

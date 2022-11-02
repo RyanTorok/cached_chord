@@ -1,12 +1,13 @@
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::cache::{Cache, make_cache};
-use crate::{NodeId, Address, ContentId, ContentStub, Value};
+use crate::{NodeId, Address, ContentId, ContentStub, Value, SUCCESSORS};
 
 pub struct Node {
     id: NodeId,
     address: Address,
     finger_table: BTreeMap<NodeId, Address>,
-    successors: Vec<(NodeId, Address)>,
+    successors: BTreeSet<(NodeId, Address)>,
     predecessor: Option<(NodeId, Address)>,
     store: HashMap<ContentStub, Value>,
     cache: Option<Box<dyn Cache>>,
@@ -19,9 +20,9 @@ pub enum FindResult {
 }
 
 impl Node {
-    pub fn new(id: NodeId, address: Address, n_successors: usize) -> Node {
+    pub fn new(id: NodeId, address: Address) -> Node {
         Node {
-            id, address, finger_table: BTreeMap::new(), successors: Vec::with_capacity(n_successors), predecessor: None, store: Default::default(), cache: None
+            id, address, finger_table: BTreeMap::new(), successors: BTreeSet::new(), predecessor: None, store: Default::default(), cache: None
         }
     }
 
@@ -58,11 +59,16 @@ impl Node {
     }
 
     pub fn add_successor(&mut self, s: (NodeId, Address)) {
-        self.successors.push(s);
+        self.successors.insert(s);
+        while self.successors.len() > SUCCESSORS {
+            // Can't be None as long as SUCCESSORS > 0.
+            let max = *self.successors.iter().rev().next().unwrap();
+            self.successors.remove(&max);
+        }
     }
 
     pub fn nth_successor(&self, n: usize) -> (NodeId, Address) {
-        self.successors[n]
+        *self.successors.iter().nth(n).expect(&format!("Node {} successor index {} out of bounds (size = {})", self.id(), n, self.successors.len()))
     }
 
     pub fn predecessor(&self) -> Option<(NodeId, Address)> {
@@ -99,4 +105,22 @@ pub enum CacheType {
 pub enum Distribution {
     Uniform,
     Zipf
+}
+
+#[derive(Ord, Eq)]
+struct Successor {
+    node: NodeId,
+    addr: Address
+}
+
+impl PartialEq<Self> for Successor {
+    fn eq(&self, other: &Self) -> bool {
+        self.node.eq(&other.node)
+    }
+}
+
+impl PartialOrd for Successor {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.node.partial_cmp(&other.node)
+    }
 }

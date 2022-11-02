@@ -23,7 +23,7 @@ pub enum MessageContent {
     JoinToMaster,
     JoinToMasterResponse(NodeId, Address), // Returns successor
     JoinToSuccessor,
-    JoinToSuccessorAck,
+//    JoinToSuccessorAck,
     SuccessorHeartbeat,
     SuccessorHeartbeatAck,
     SuccessorHeartbeatNewSuccessor(NodeId, Address),
