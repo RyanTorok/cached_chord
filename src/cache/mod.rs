@@ -12,7 +12,7 @@ use crate::{Address, cache::{
     lru::LruCache,
     mru::MruCache,
     no_cache::NoCache
-}, chord::CacheType, ContentId};
+}, node::CacheType, ContentId};
 
 type Entry = (ContentId, Address);
 

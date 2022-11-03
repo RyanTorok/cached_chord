@@ -1,21 +1,24 @@
 #![feature(binary_heap_retain)]
+#![feature(hash_drain_filter)]
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-mod chord;
+mod node;
 mod cache;
 //mod sim;
-mod single_node_runner;
+mod node_runner;
 mod message;
 mod net_interface;
 
+use std::time::Duration;
 use clap::Parser;
-use crate::chord::{CacheType, Distribution};
+use crate::node::{CacheType, Distribution};
 use crate::net_interface::{run_inbox, run_outbox};
-use crate::single_node_runner::{run_node, SingleNodeRunner};
+use crate::node_runner::{run_node, send_heartbeat_triggers, SingleNodeRunner};
 
 pub const SUCCESSORS: usize = 32;
 pub const MASTER_NODE: NodeId = 0;
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
 pub type NodeId = u32;
 pub type ContentStub = u32;
@@ -72,7 +75,9 @@ async fn main() {
     let args = Args::parse();
     let ip = Default::default(); // TODO
     let (r, inbox, outbox) = SingleNodeRunner::new(args.n, ip, args.keys, args.cache, args.cache_size, args.requests, args.distribution, args.zipf_param);
+    let clone_inbox = inbox.clone();
     tokio::spawn(run_inbox(inbox));
     tokio::spawn(run_outbox(outbox));
+    tokio::spawn(send_heartbeat_triggers(clone_inbox, HEARTBEAT_INTERVAL));
     tokio::spawn(run_node(r));
 }

@@ -1,22 +1,24 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Range;
 use crate::cache::{Cache, make_cache, default_cache};
-use crate::{NodeId, Address, ContentId, ContentStub, Value, SUCCESSORS};
+use crate::{NodeId, Address, ContentId, Value, SUCCESSORS};
 use serde::{Serialize, Deserialize};
 
 pub struct Node {
     id: NodeId,
     address: Address,
-    finger_table: BTreeMap<NodeId, Address>,
+    finger_table: BTreeMap<NodeId, (NodeId, Address, Range<NodeId>)>,
     successors: BTreeSet<(NodeId, Address)>,
     predecessor: Option<(NodeId, Address)>,
-    store: HashMap<ContentStub, Value>,
+    store: HashMap<ContentId, Value>,
     cache: Box<dyn Cache + Send>,
+    active: bool
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum FindResult {
-    Value(Value),
+    Value(Value, Range<NodeId>), // Range indicates set of serviced keys, for populating other nodes' finger tables.
     Redirect(Address),
     Error(String),
 }
@@ -24,8 +26,12 @@ pub enum FindResult {
 impl Node {
     pub fn new(id: NodeId, address: Address) -> Node {
         Node {
-            id, address, finger_table: BTreeMap::new(), successors: BTreeSet::new(), predecessor: None, store: Default::default(), cache: Box::new(default_cache())
+            id, address, finger_table: BTreeMap::new(), successors: BTreeSet::new(), predecessor: None, store: Default::default(), cache: Box::new(default_cache()), active: false
         }
+    }
+
+    pub fn set(&mut self, key: ContentId, value: Value) {
+        self.store.insert(key, value);
     }
 
     pub fn id(&self) -> NodeId {
@@ -44,9 +50,9 @@ impl Node {
     // that update internal state on a read (e.g. LRU)
     pub fn next_finger(&mut self, target: ContentId) -> FindResult {
         if target.0 == self.id {
-            match self.store.get(&target.1) {
+            match self.store.get(&target) {
                 None => FindResult::Error("No such object.".to_string()),
-                Some(val) => FindResult::Value(*val)
+                Some(val) => FindResult::Value(*val, self.predecessor.unwrap().0..self.id)
             }
         } else if let Some(addr) = self.cache.get(target) {
             // Cache hit -- redirect straight to the node that has the key
@@ -55,14 +61,15 @@ impl Node {
             match self.finger_table.iter().rev().find(|ent| *ent.0 < target.0) {
                 None => FindResult::Error("No available finger pointer.".to_string()),
                 Some(ent) => {
-                    FindResult::Redirect(*ent.1)
+                    FindResult::Redirect(ent.1.1)
                 },
             }
         }
     }
 
-    pub fn populate_finger(&mut self, node: NodeId, addr: Address) {
-        self.finger_table.insert(node, addr);
+    pub fn populate_finger(&mut self, finger_key: NodeId, f_node: NodeId, f_addr: Address, key_range: Range<NodeId>) -> usize {
+        self.finger_table.insert(finger_key, (f_node, f_addr, key_range));
+        self.finger_table.len()
     }
 
     pub fn add_successor(&mut self, s: (NodeId, Address)) {
@@ -86,12 +93,37 @@ impl Node {
         self.predecessor = Some(s);
     }
 
+    pub fn drain_keys_before(&mut self, predecessor: NodeId) -> Vec<(ContentId, Value)> {
+        // Remove all keys that have a key <= the new predecessor node.
+        self.store.drain_filter(|(node_id, stub), _| {
+            // Determine if the key is between the predecessor and us. Return false if it is, true otherwise.
+            let node_id = *node_id;
+            if predecessor < self.id {
+                // No overflow between predecessor and us.
+                !(predecessor < node_id && node_id < self.id)
+            } else {
+                // Overflow between predecessor and us.
+                // If the node is between us and the predecessor (where there's no overflow)
+                // than it's NOT between the predecessor and us.
+                self.id < node_id && node_id < predecessor
+            }
+        }).collect()
+    }
+
     pub fn init_cache(&mut self, cache_type: CacheType, size: usize) {
         self.cache = make_cache(cache_type, size);
     }
 
     pub fn cache_key(&mut self, key: ContentId, addr: Address) {
         self.cache.set(key, addr);
+    }
+
+    pub fn inactive(&self) -> bool {
+        !self.active
+    }
+
+    pub fn activate(&mut self) {
+        self.active = true;
     }
 }
 

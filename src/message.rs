@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use crate::chord::FindResult;
+use crate::node::FindResult;
 use crate::{Address, ContentId, NodeId, Value};
 use serde::{Serialize, Deserialize};
 
@@ -20,16 +20,24 @@ impl ChordMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MessageContent {
-    NewRequest(ContentId, FutureValue), // Represents a new request given by the user
+    ClientRequest(ContentId, ClientOperation), // Represents a new request given by the client.
     Find(ContentId),
     FindResponse(ContentId, FindResult),
+    PutValue(ContentId, Value),
     JoinToMaster,
     JoinToMasterResponse(NodeId, Address), // Returns successor
     JoinToSuccessor,
-//    JoinToSuccessorAck,
+    JoinToSuccessorAck(Vec<(ContentId, Value)>),
     SuccessorHeartbeat,
     SuccessorHeartbeatAck,
     SuccessorHeartbeatNewSuccessor(NodeId, Address),
+    HeartbeatTimerExpired
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ClientOperation {
+    Get(FutureValue),
+    Put(Value)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
