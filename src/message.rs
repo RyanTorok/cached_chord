@@ -27,11 +27,12 @@ pub enum MessageContent {
     JoinToMaster,
     JoinToMasterResponse(NodeId, Address), // Returns successor
     JoinToSuccessor,
-    JoinToSuccessorAck(Vec<(ContentId, Value)>),
+    JoinToSuccessorAck((NodeId, Address), Vec<(ContentId, Value)>),
     SuccessorHeartbeat,
     SuccessorHeartbeatAck,
     SuccessorHeartbeatNewSuccessor(NodeId, Address),
-    HeartbeatTimerExpired
+    HeartbeatTimerExpired,
+    FixFingerTimerExpired(NodeId),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

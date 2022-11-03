@@ -10,15 +10,21 @@ mod node_runner;
 mod message;
 mod net_interface;
 
+use std::fmt::{Debug, Display, Formatter};
+use std::net::Ipv4Addr;
+use std::process::Command;
+use std::str::FromStr;
 use std::time::Duration;
 use clap::Parser;
 use crate::node::{CacheType, Distribution};
 use crate::net_interface::{run_inbox, run_outbox};
-use crate::node_runner::{run_node, send_heartbeat_triggers, SingleNodeRunner};
+use crate::node_runner::{run_node, send_fix_fingers_triggers, send_heartbeat_triggers, SingleNodeRunner};
+use serde::{Serialize, Deserialize};
 
 pub const SUCCESSORS: usize = 32;
 pub const MASTER_NODE: NodeId = 0;
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+pub const FIX_FINGER_INTERVAL: Duration = Duration::from_millis(250);
 
 pub type NodeId = u32;
 pub type ContentStub = u32;
@@ -26,7 +32,20 @@ pub type RequestId = u64;
 pub type ContentId = (NodeId, ContentStub);
 
 // IPv4 Address
-pub type Address = u32;
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, Ord, PartialOrd, PartialEq, Eq)]
+pub struct Address(Ipv4Addr);
+
+impl Default for Address {
+    fn default() -> Self {
+        Address(Ipv4Addr::UNSPECIFIED)
+    }
+}
+
+impl Display for Address {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
 
 // I'd like to do u8; 128, but serde doesn't auto-implement traits for arrays longer than 32 elements.
 pub type Value = [u32; 32];
@@ -73,11 +92,16 @@ pub enum Mode {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let ip = Default::default(); // TODO
-    let (r, inbox, outbox) = SingleNodeRunner::new(args.n, ip, args.keys, args.cache, args.cache_size, args.requests, args.distribution, args.zipf_param);
+    let ip = Ipv4Addr::from_str(String::from_utf8(Command::new("hostname").arg("-I").output()
+        .expect("Error: could not read IP address with `hostname -I` command.").stdout)
+        .expect("String returned by `hostname -I` was not valid UTF-8.").as_str())
+        .expect("IP address returned by `hostname -I` was invalid.");
+    let (r, inbox, outbox) = SingleNodeRunner::new(args.n, Address(ip), args.keys, args.cache, args.cache_size, args.requests, args.distribution, args.zipf_param);
     let clone_inbox = inbox.clone();
+    let clone_inbox_2 = inbox.clone();
     tokio::spawn(run_inbox(inbox));
     tokio::spawn(run_outbox(outbox));
     tokio::spawn(send_heartbeat_triggers(clone_inbox, HEARTBEAT_INTERVAL));
+    tokio::spawn(send_fix_fingers_triggers(clone_inbox_2, FIX_FINGER_INTERVAL));
     tokio::spawn(run_node(r));
 }

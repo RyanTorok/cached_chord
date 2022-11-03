@@ -5,10 +5,6 @@ use crate::message::ChordMessage;
 
 const PORT: u16 = 8080;
 
-pub struct NetworkInterface {
-
-}
-
 pub async fn run_inbox(inbox: Sender<ChordMessage>) {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await.expect("Error: could not bind to TCP port.");
     let mut buf = [0u8; 257];

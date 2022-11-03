@@ -69,7 +69,7 @@ fn split_u64(n: u64) -> (NodeId, ContentStub) {
 pub async fn run_requests(requests: u64, keys: u64, node_addr: Address, tx: mpsc::Sender<ChordMessage>, dist: Distribution, zipf_param: f64) {
     for request_id in 0..requests {
         let sink = FutureValue::new();
-        tx.send(ChordMessage::new((u32::MAX, u32::MAX),node_addr, MessageContent::ClientRequest(
+        tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(
             match dist {
                 Distribution::Uniform => {
                     // ThreadRng is not `Send` because it relies on thread-specific mechanics,
@@ -94,8 +94,23 @@ pub async fn send_heartbeat_triggers(inbox: Sender<ChordMessage>, interval: Dura
     loop {
         timer.tick().await;
         // Don't need to fill src/dest information because this message is internal.
-        inbox.send(ChordMessage::new((u32::MAX, u32::MAX), u32::MAX, MessageContent::HeartbeatTimerExpired)).await
+        inbox.send(ChordMessage::new((u32::MAX, Default::default()), Default::default(), MessageContent::HeartbeatTimerExpired)).await
             .expect("Error: Could not send HeartbeatTimerExpired message to inbox.");
+    }
+}
+
+pub async fn send_fix_fingers_triggers(inbox: Sender<ChordMessage>, interval: Duration) {
+    let mut delta: NodeId = 1;
+    let mut timer = tokio::time::interval(interval);
+    loop {
+        timer.tick().await;
+        inbox.send(ChordMessage::new((u32::MAX, Default::default()), Default::default(), MessageContent::FixFingerTimerExpired(delta))).await
+            .expect("Error: Could not send HeartbeatTimerExpired message to inbox.");
+        if delta >= NodeId::MAX / 2 {
+            delta = 1;
+        } else {
+            delta *= 2;
+        }
     }
 }
 
@@ -188,12 +203,12 @@ pub async fn run_node(mut r: SingleNodeRunner) {
                     MessageContent::FindResponse(key, result) => {
                         match result {
                             FindResult::Value(get_val, key_range) => {
-                                if r.node.inactive() {
-                                    // If we get a response at this point, it's a request we issued internally
-                                    // to populate our finger table. In that case, the value is
-                                    // worthless to us; we only care about which node serviced the key.
+                                let diff_key = key.0.wrapping_sub(r.node.id()) as f64;
+                                if diff_key.log2().floor() == diff_key.log2().ceil() {
+                                    // We got a key that was a power of 2 away from our node, possibly from fix_finger().
+                                    // We can use it to update our finger table.
                                     let size_so_far = r.node.populate_finger(key.0, msg.src.0, msg.src.1, key_range);
-                                    if size_so_far >= size_of::<NodeId>() / 2 {
+                                    if r.node.inactive() && size_so_far >= size_of::<NodeId>() / 2 {
                                         // We've fully populated our table. Our node is ready for prime time!
                                         r.node.activate();
                                     }
@@ -306,18 +321,20 @@ pub async fn run_node(mut r: SingleNodeRunner) {
                     }
                     MessageContent::JoinToSuccessor => {
                         // We have a new predecessor
-                        let old_p = r.node.predecessor();
                         r.node.set_predecessor(msg.src);
                         // Reply to the new node with the keys it should be responsible for
                         let send_keys = r.node.drain_keys_before(msg.src.0);
                         let src = r.node.msg_id();
-                        if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::JoinToSuccessorAck(send_keys))).await {
-                            eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
+                        let pred = r.node.predecessor();
+                        if let Some(pred) = pred {
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::JoinToSuccessorAck(pred, send_keys))).await {
+                                eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
+                            }
                         }
                     },
-                    MessageContent::JoinToSuccessorAck(keys) => {
+                    MessageContent::JoinToSuccessorAck(predecessor, keys) => {
+                        r.node.set_predecessor(predecessor);
                         keys.into_iter().for_each(|(k, v) | r.node.set(k, v));
-
                     },
                     MessageContent::SuccessorHeartbeat => {
                         // Check if we have a later predecessor than the node that thinks we're
@@ -356,6 +373,23 @@ pub async fn run_node(mut r: SingleNodeRunner) {
                                 if let Err(e) = r.outgoing.send(ChordMessage::new(src, *s_addr, MessageContent::SuccessorHeartbeat)).await {
                                     eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
                                 }
+                            }
+                        }
+                    }
+                    MessageContent::FixFingerTimerExpired(delta) => {
+                        let src = r.node.msg_id();
+                        let dummy_key = (src.0.wrapping_add(delta), 0);
+                        match r.node.next_finger(dummy_key) {
+                            FindResult::Value(_, _) => {
+                                eprintln!("Error: fix_finger should not redirect to itself.")
+                            }
+                            FindResult::Redirect(next) => {
+                                if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(dummy_key))).await {
+                                    eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
+                                }
+                            }
+                            FindResult::Error(e) => {
+                                eprintln!("Error: Find for fix_finger was unsuccessful: {}", e)
                             }
                         }
                     }
