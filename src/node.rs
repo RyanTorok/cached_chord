@@ -20,6 +20,7 @@ pub struct Node {
 pub enum FindResult {
     Value(Value, Range<NodeId>), // Range indicates set of serviced keys, for populating other nodes' finger tables.
     Redirect(Address),
+    NoSuchEntry,
     Error(String),
 }
 
@@ -46,12 +47,29 @@ impl Node {
         (self.id(), self.address())
     }
 
+    fn responsible_for(&self, key: ContentId) -> bool {
+            match self.predecessor {
+                None => false,
+                Some(p) => {
+                    let us = self.id;
+                    let them = p.0;
+                    if them < us {
+                        // No overflow between them and us
+                        them < p.0 && p.0 <= us
+                    } else {
+                        // them >= us
+                        !(us < p.0 && p.0 <= them)
+                    }
+                }
+            }
+    }
+
     // This function takes &mut self because it allows us to avoid using a RefCell inside the caches
     // that update internal state on a read (e.g. LRU)
     pub fn next_finger(&mut self, target: ContentId) -> FindResult {
-        if target.0 == self.id {
+        if self.responsible_for(target) {
             match self.store.get(&target) {
-                None => FindResult::Error("No such object.".to_string()),
+                None => FindResult::NoSuchEntry,
                 Some(val) => FindResult::Value(*val, self.predecessor.unwrap().0..self.id)
             }
         } else if let Some(addr) = self.cache.get(target) {
@@ -59,7 +77,16 @@ impl Node {
             FindResult::Redirect(addr)
         } else {
             match self.finger_table.iter().rev().find(|ent| *ent.0 < target.0) {
-                None => FindResult::Error("No available finger pointer.".to_string()),
+                None => {
+                    // No luck in the finger table (this can happen nominally in some degenerate cases like
+                    // a single node or when first initializing the finger table).
+                    match self.successors.iter().rev().find(|ent | ent.0 < target.0) {
+                        None => FindResult::Error("No available finger pointer.".to_string()),
+                        Some((_s_node, s_addr)) => {
+                            FindResult::Redirect(*s_addr)
+                        }
+                    }
+                }
                 Some(ent) => {
                     FindResult::Redirect(ent.1.1)
                 },

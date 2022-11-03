@@ -27,11 +27,22 @@ pub struct SingleNodeRunner {
     requests: u64,
     distribution: Distribution,
     zipf_param: f64,
-    op_count: u64
+    op_count: u64,
+    master_ip: Address
 }
 
 impl SingleNodeRunner {
-    pub fn new(n: u32, address: Address, keys: u64, cache: CacheType, cache_size: usize, requests: RequestId, distribution: Distribution, zipf_param: f64) -> (SingleNodeRunner, Sender<ChordMessage>, Receiver<ChordMessage>) {
+    pub fn new(
+        n: u32,
+        address: Address,
+        keys: u64,
+        cache: CacheType,
+        cache_size: usize,
+        master_ip: Address,
+        requests: RequestId,
+        distribution: Distribution,
+        zipf_param: f64
+    ) -> (SingleNodeRunner, Sender<ChordMessage>, Receiver<ChordMessage>) {
         let (in_tx, incoming) = mpsc::channel(BUFFER_SIZE);
         let (outgoing, out_rx) = mpsc::channel(BUFFER_SIZE);
         let mut node = Node::new(n, address);
@@ -47,7 +58,8 @@ impl SingleNodeRunner {
             requests,
             distribution,
             zipf_param,
-            op_count: 0u64
+            op_count: 0u64,
+            master_ip
         }, in_tx, out_rx)
     }
 }
@@ -65,8 +77,9 @@ fn split_u64(n: u64) -> (NodeId, ContentStub) {
     (u32::from_be_bytes(node_id), u32::from_be_bytes(node_offset))
 }
 
-// Submits requests for keys to a single nade according to the given distribution
-pub async fn run_requests(requests: u64, keys: u64, node_addr: Address, tx: mpsc::Sender<ChordMessage>, dist: Distribution, zipf_param: f64) {
+// Submits requests for keys to a single node according to the given distribution
+pub async fn run_requests(requests: u64, node_addr: Address, tx: Sender<ChordMessage>, dist: Distribution, zipf_param: f64) {
+    let keys = u64::MAX;
     for request_id in 0..requests {
         let sink = FutureValue::new();
         tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(
@@ -115,7 +128,7 @@ pub async fn send_fix_fingers_triggers(inbox: Sender<ChordMessage>, interval: Du
 }
 
 pub async fn run_node(mut r: SingleNodeRunner) {
-    tokio::spawn(run_requests(r.requests, r.keys, r.node.address(), r.outgoing.clone(), r.distribution, r.zipf_param));
+    tokio::spawn(run_requests(r.requests, r.node.address(), r.outgoing.clone(), r.distribution, r.zipf_param));
     if r.node.id() == MASTER_NODE {
         // We're the master node. That means we start first (by assumption), making us our own
         // predecessor and successor.
@@ -123,8 +136,11 @@ pub async fn run_node(mut r: SingleNodeRunner) {
         r.node.add_successor((MASTER_NODE, r.node.address()));
         r.node.activate();
     } else {
-        // We're a normal node. We need to populate finger table by asking our successor to find
-        // the location of exponentially increasing keys.
+        // We're a normal node. We need to message the master to bootstrap ourselves into the ring.
+        let src = r.node.msg_id();
+        if let Err(e) = r.outgoing.send(ChordMessage::new(src, r.master_ip, MessageContent::JoinToMaster)).await {
+            eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
+        }
     }
     let r = &mut r;
     loop {
@@ -176,6 +192,7 @@ pub async fn run_node(mut r: SingleNodeRunner) {
                                     }
                                 }
                                 FindResult::Redirect(next) => {
+                                    println!("First redirect for key ({}, {}) to address {}", key.0, key.1, next.to_string());
                                     let src = r.node.msg_id();
                                     if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(key))).await {
                                         eprintln!("Error: Could not send Find message because of error '{}'", e);
@@ -183,6 +200,9 @@ pub async fn run_node(mut r: SingleNodeRunner) {
                                 }
                                 FindResult::Error(e) => {
                                     eprintln!("Find error (Node = {}, Requested key = (node: {}, stub: {})): {}", r.node.id(), key.0, key.1, e);
+                                }
+                                FindResult::NoSuchEntry => {
+                                    eprintln!("Error: No such entry for key: ({}, {})", key.0, key.1);
                                 }
                             }
                         }
@@ -249,6 +269,9 @@ pub async fn run_node(mut r: SingleNodeRunner) {
                             }
                             FindResult::Error(e) => {
                                 eprintln!("Find error (Node = {}, Requested key = (node: {}, stub: {})): {}", r.node.id(), key.0, key.1, e);
+                            }
+                            FindResult::NoSuchEntry => {
+                                eprintln!("Error: No such entry for key: ({}, {})", key.0, key.1);
                             }
                         }
                     },
@@ -380,8 +403,8 @@ pub async fn run_node(mut r: SingleNodeRunner) {
                         let src = r.node.msg_id();
                         let dummy_key = (src.0.wrapping_add(delta), 0);
                         match r.node.next_finger(dummy_key) {
-                            FindResult::Value(_, _) => {
-                                eprintln!("Error: fix_finger should not redirect to itself.")
+                            FindResult::Value(..) | FindResult::NoSuchEntry => {
+                                // We redirected to ourself. There's nothing to put in the finger table.
                             }
                             FindResult::Redirect(next) => {
                                 if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(dummy_key))).await {

@@ -67,8 +67,11 @@ struct Args {
     cache: CacheType,
 
     /// Size of cache (entries)
-    #[arg(short, long)]
+    #[arg(long)]
     cache_size: usize,
+
+    #[arg(long)]
+    master_ip: String,
 
     /// Number of requests
     #[arg(short, long)]
@@ -92,16 +95,32 @@ pub enum Mode {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let ip = Ipv4Addr::from_str(String::from_utf8(Command::new("hostname").arg("-I").output()
+    let ip = match Ipv4Addr::from_str(String::from_utf8(Command::new("hostname").arg("-I").output()
         .expect("Error: could not read IP address with `hostname -I` command.").stdout)
-        .expect("String returned by `hostname -I` was not valid UTF-8.").as_str())
-        .expect("IP address returned by `hostname -I` was invalid.");
-    let (r, inbox, outbox) = SingleNodeRunner::new(args.n, Address(ip), args.keys, args.cache, args.cache_size, args.requests, args.distribution, args.zipf_param);
+        .expect("String returned by `hostname -I` was not valid UTF-8.").trim()) {
+        Ok(ip) => ip,
+        Err(e) => {
+            eprintln!("ip address error: {}", e);
+            Ipv4Addr::UNSPECIFIED
+        }
+    };
+        //.expect("IP address returned by `hostname -I` was invalid.");
+    let (r, inbox, outbox) = SingleNodeRunner::new(
+        args.n,
+        Address(ip),
+        args.keys,
+        args.cache,
+        args.cache_size,
+        Address(Ipv4Addr::from_str(&args.master_ip).expect("Invalid master IP address format.")),
+        args.requests,
+        args.distribution,
+        args.zipf_param
+    );
     let clone_inbox = inbox.clone();
     let clone_inbox_2 = inbox.clone();
-    tokio::spawn(run_inbox(inbox));
+    tokio::spawn(run_inbox(inbox, ip));
     tokio::spawn(run_outbox(outbox));
     tokio::spawn(send_heartbeat_triggers(clone_inbox, HEARTBEAT_INTERVAL));
     tokio::spawn(send_fix_fingers_triggers(clone_inbox_2, FIX_FINGER_INTERVAL));
-    tokio::spawn(run_node(r));
+    tokio::spawn(run_node(r)).await.expect("Error: run_node should never return.");
 }
