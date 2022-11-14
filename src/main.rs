@@ -21,10 +21,9 @@ use crate::net_interface::{run_inbox, run_outbox};
 use crate::node_runner::{run_node, send_fix_fingers_triggers, send_heartbeat_triggers, SingleNodeRunner};
 use serde::{Serialize, Deserialize};
 
-pub const SUCCESSORS: usize = 32;
 pub const MASTER_NODE: NodeId = 0;
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
-pub const FIX_FINGER_INTERVAL: Duration = Duration::from_millis(250);
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+pub const FIX_FINGER_INTERVAL: Duration = Duration::from_millis(500);
 
 pub type NodeId = u32;
 pub type ContentStub = u32;
@@ -82,7 +81,10 @@ struct Args {
     distribution: Distribution,
 
     #[arg(long, default_value_t = 1.0)]
-    zipf_param: f64
+    zipf_param: f64,
+
+    #[arg(short, default_value_t = false)]
+    verbose: bool
 
 }
 
@@ -105,7 +107,7 @@ async fn main() {
         }
     };
         //.expect("IP address returned by `hostname -I` was invalid.");
-    let (r, inbox, outbox) = SingleNodeRunner::new(
+    let (r, inbox, outbox, activation) = SingleNodeRunner::new(
         args.n,
         Address(ip),
         args.keys,
@@ -114,13 +116,14 @@ async fn main() {
         Address(Ipv4Addr::from_str(&args.master_ip).expect("Invalid master IP address format.")),
         args.requests,
         args.distribution,
-        args.zipf_param
+        args.zipf_param,
+        args.verbose
     );
     let clone_inbox = inbox.clone();
     let clone_inbox_2 = inbox.clone();
     tokio::spawn(run_inbox(inbox, ip));
-    tokio::spawn(run_outbox(outbox));
+    tokio::spawn(run_outbox(outbox, args.verbose));
     tokio::spawn(send_heartbeat_triggers(clone_inbox, HEARTBEAT_INTERVAL));
     tokio::spawn(send_fix_fingers_triggers(clone_inbox_2, FIX_FINGER_INTERVAL));
-    tokio::spawn(run_node(r)).await.expect("Error: run_node should never return.");
+    tokio::spawn(run_node(r, activation)).await.expect("Error: run_node should never return.");
 }

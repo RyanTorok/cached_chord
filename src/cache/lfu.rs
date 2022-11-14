@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap};
-use crate::cache::{Cache, CacheStats, Entry};
+use crate::cache::{Cache, Entry};
 use crate::{Address, ContentId};
 
 #[derive(Eq, Ord, Clone, Copy)]
@@ -22,7 +22,6 @@ pub struct LfuCache {
     capacity: usize,
     size: usize,
     store: BinaryHeap<RankedEntry>,
-    stats: CacheStats
 }
 
 impl LfuCache {
@@ -31,7 +30,6 @@ impl LfuCache {
             capacity,
             size: 0,
             store: Default::default(),
-            stats: Default::default()
         }
     }
 }

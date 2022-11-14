@@ -1,13 +1,15 @@
 use std::net::Ipv4Addr;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{Receiver, Sender};
+use crate::Address;
 use crate::message::ChordMessage;
 
 const PORT: u16 = 8080;
 
 pub async fn run_inbox(inbox: Sender<ChordMessage>, ip: Ipv4Addr) {
-    let listener = TcpListener::bind(format!("{}:{}", ip.to_string(), PORT)).await.expect("Error: could not bind to TCP port.");
+    let listener = TcpListener::bind(format!("{}:{}", ip, PORT)).await.expect("Error: could not bind to TCP port.");
     let mut buf = [0u8; 257];
     loop {
         match listener.accept().await {
@@ -37,26 +39,35 @@ pub async fn run_inbox(inbox: Sender<ChordMessage>, ip: Ipv4Addr) {
     }
 }
 
-pub async fn run_outbox(mut outbox: Receiver<ChordMessage>) {
+pub async fn run_outbox(mut outbox: Receiver<ChordMessage>, verbose: bool) {
     loop {
         match outbox.recv().await {
             Some(msg) => {
-                let mut socket;
-                loop {
-                    match TcpStream::connect(format!("{}:{}", msg.dest, PORT)).await {
-                        Err(e) => {
-                            eprintln!("Error: Could not create outgoing socket for outbox -- dest = {}", msg.dest);
-                        }
-                        Ok(sock) => {
-                            socket = sock;
-                            break;
+                if verbose {
+                    println!("Outgoing message to address {:?}: {:?}", msg.dest, msg.content);
+                }
+                // TODO do something with client replies.
+                if !msg.dest.eq(&Address(Ipv4Addr::new(0, 0, 0, 0))) {
+                    loop {
+                        match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(format!("{}:{}", msg.dest, PORT))).await {
+                            Ok(res_socket) => {
+                                match res_socket {
+                                    Ok(mut socket) => {
+                                        socket.write(&*bincode::serialize(&msg)
+                                            .expect("Error: Could not serialize ChordMessage from outbox.")).await
+                                            .expect("Error: Could not write serialized ChordMessage to socket.");
+                                        socket.flush().await.expect("Error: Socket flush failed.");
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error: Could not create outgoing socket for outbox (dest = {}) because of error: {}", msg.dest, e);
+                                    }
+                                }
+                            }
+                            Err(e) => { eprintln!("Error: Could not create outgoing socket for outbox (dest = {}) because of error: {}", msg.dest, e); }
                         }
                     }
                 }
-                socket.write(&*bincode::serialize(&msg)
-                    .expect("Error: Could not serialize ChordMessage from outbox.")).await
-                    .expect("Error: Could not write serialized ChordMessage to socket.");
-                socket.flush().await.expect("Error: Socket flush failed.");
             }
             None => {
                 eprintln!("Error: Removed a `None` from outbox.")

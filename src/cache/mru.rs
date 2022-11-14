@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
-use crate::cache::{Cache, CacheStats, Entry};
+use crate::cache::{Cache, Entry};
 use crate::{Address, ContentId};
 
 pub struct MruCache {
     capacity: usize,
     size: usize,
     store: VecDeque<Entry>,
-    stats: CacheStats
 }
 
 impl MruCache {
@@ -15,7 +14,6 @@ impl MruCache {
             capacity,
             size: 0,
             store: Default::default(),
-            stats: Default::default()
         }
     }
 }

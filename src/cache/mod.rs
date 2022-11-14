@@ -5,6 +5,7 @@ mod lifo;
 mod lfu;
 mod no_cache;
 
+use std::fmt::{Display, Formatter};
 use crate::{Address, cache::{
     fifo::FifoCache,
     lfu::LfuCache,
@@ -17,9 +18,30 @@ use crate::{Address, cache::{
 type Entry = (ContentId, Address);
 
 #[derive(Default)]
-struct CacheStats {
-    pub hits: u64,
-    pub total: u64,
+pub struct CacheStats {
+    hits: u64,
+    total: u64,
+}
+
+impl CacheStats {
+    pub fn new() -> CacheStats {
+        CacheStats { hits: 0, total: 0 }
+    }
+
+    pub fn hit(&mut self) {
+        self.total += 1;
+        self.hits += 1;
+    }
+
+    pub fn miss(&mut self) {
+        self.total += 1;
+    }
+}
+
+impl Display for CacheStats {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("Hit Rate: {}/{} ({:.1}%)", self.hits, self.total, ((self.hits as f64) / (self.total as f64) * 1000.0).round() / 10.0))
+    }
 }
 
 pub trait Cache {
