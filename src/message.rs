@@ -24,11 +24,10 @@ pub enum MessageContent {
     Find(ContentId),
     FindResponse(ContentId, FindResult),
     PutValue(ContentId, Value),
-    PutValues(Vec<(ContentId, Value)>),
     JoinToMaster,
     JoinToMasterResponse(NodeId, Address), // Returns successor
     JoinToSuccessor,
-    JoinToSuccessorAck((NodeId, Address), Vec<(ContentId, Value)>),
+    JoinToSuccessorAck((NodeId, Address)),
     SuccessorHeartbeat,
     SuccessorHeartbeatAck,
     SuccessorHeartbeatNewSuccessor(NodeId, Address),

@@ -146,6 +146,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
         // Insert ourselves as our own successor
         r.successor_table.insert(MASTER_NODE, (r.node.address(), (MASTER_NODE, r.node.address())));
         r.node.activate();
+        r.activation.take().expect("Should not get here more than once.").send(()).expect("Send error on activation oneshot() channel.");
     } else {
         // We're a normal node. We need to message the master to bootstrap ourselves into the ring.
         let src = r.node.msg_id();
@@ -187,7 +188,6 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                     }
                                 }
                                 ClientOperation::Put(val) => {
-                                    println!("adding a Put value!");
                                     r.puts_in_transit.insert(key, (val, r.op_count));
                                 }
                             }
@@ -201,8 +201,15 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                         futures.into_iter().for_each(|(mut f, _seq)| f.complete(val));
                                     }
 
+
+                                    if let Some(value) = r.puts_in_transit.remove(&key) {
+                                        r.node.set(key, value.0);
+                                    }
+
                                     // If we get here, we own the key, so we can just set the entry.
                                     if let Some(put_val) = opt_put_val {
+                                        // Should be the same value, since we just added it, but we don't care
+                                        // because other sequence numbers are inferior to ours anyway.
                                         r.node.set(key, put_val);
                                     }
                                 }
@@ -217,7 +224,16 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                     eprintln!("Find error (Node = {}, Requested key = (node: {}, stub: {})): {}", r.node.id(), key.0, key.1, e);
                                 }
                                 FindResult::NoSuchEntry(_) => {
-                                    eprintln!("Error: No such entry for key: ({}, {})", key.0, key.1);
+                                    // Should be the same value, since we just added it, but we don't care
+                                    // because other sequence numbers are inferior to ours anyway.
+                                    if let Some(value) = r.puts_in_transit.remove(&key) {
+                                        r.node.set(key, value.0);
+                                    }
+
+                                    // If we get here, we own the key, so we can just set the entry.
+                                    if let Some(put_val) = opt_put_val {
+                                        r.node.set(key, put_val);
+                                    }
                                 }
                             }
                         }
@@ -245,16 +261,12 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                 let size_so_far = r.node.populate_finger(key.0, msg.src.0, msg.src.1, key_range);
                                 if r.node.inactive() && size_so_far >= size_of::<NodeId>() / 2 {
                                     // We've fully populated our table. Our node is ready for prime time!
-                                    println!("activate!");
                                     r.node.activate();
                                     r.activation.take().expect("Should not get here more than once.").send(()).expect("Send error on activation oneshot() channel.");
                                 }
                             }
                         };
                         let put_in_transit = r.puts_in_transit.get(&key);
-                        if let Some(p) = &put_in_transit{
-                            println!("Put is in transit!");
-                        }
                         match result {
                             FindResult::Value(get_val, key_range) => {
                                 update_finger(key, key_range);
@@ -312,17 +324,9 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                             eprintln!("Error: Non master node (node {}) received JoinToMaster message. The master node is {}.", r.node.id(), MASTER_NODE)
                         } else {
                             let new_node_id = msg.src.0;
-                            println!("successor table = {:?}", r.successor_table);
                             // Add new node's successor
                             let (s_node, s_addr) = r.successor_table.iter().min_by(|(me, _), (other, _)| {
-                                let my_sub = me.wrapping_sub(new_node_id);
-                                let other_sub = other.wrapping_sub(new_node_id);
-                                println!("su_sub for {} - {} = {}", **me, new_node_id, my_sub);
-                                println!("su_sub for {} - {} = {}", **other, new_node_id, other_sub);
-                                let ordering = my_sub.cmp(&other_sub);
-                                println!("ordering: {:?}", ordering);
-                                ordering
-
+                                me.wrapping_sub(new_node_id).cmp(&other.wrapping_sub(new_node_id))
                             }).map(|(n, (a, (sn, sa)))| (*n, *a))
                                 .expect("There must be at least one key in the successor table if we get here.");
 
@@ -330,13 +334,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                             // Add new node's successor
                             let (p_node, p_addr) = r.successor_table.iter().min_by(|(me, _), (other, _)| {
                                 // Notice the subtraction is reversed here from above. wrapping_add() calls make the same node as a predecessor rank last, not first.
-                                let my_sub = new_node_id.wrapping_sub(**me);
-                                let other_sub = new_node_id.wrapping_sub(**other);
-                                println!("pre_sub for {} - {} = {}", new_node_id, **me, my_sub);
-                                println!("pre_sub for {} - {} = {}", new_node_id, **other, other_sub);
-                                let ordering = my_sub.cmp(&other_sub);
-                                println!("ordering: {:?}", ordering);
-                                ordering
+                                new_node_id.wrapping_sub(**me).cmp(&new_node_id.wrapping_sub(**other))
                             }).map(|(n, (a, (sn, sa)))| (*n, *a))
                                 .expect("There must be at least one key in the successor table if we get here.");
 
@@ -383,24 +381,25 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                     }
                     MessageContent::JoinToSuccessor => {
                         // Reply to the new node with the keys it should be responsible for
-                        let send_keys = r.node.offload_keys_before(msg.src.0);
                         let src = r.node.msg_id();
                         let old_predecessor = r.node.predecessor();
                         // We have a new predecessor
                         r.node.set_predecessor(msg.src);
                         if let Some(pred) = old_predecessor {
-                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::JoinToSuccessorAck(pred, send_keys))).await {
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::JoinToSuccessorAck(pred))).await {
                                 eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
+                            }
+                            let send_keys = r.node.offload_keys_before(msg.src.0);
+                            // Send one at a time to avoid overflowing simulated constant-size network buffer.
+                            for (k, v) in send_keys {
+                                if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v))).await {
+                                    eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
+                                }
                             }
                         }
                     },
-                    MessageContent::JoinToSuccessorAck(predecessor, keys) => {
+                    MessageContent::JoinToSuccessorAck(predecessor) => {
                         r.node.set_predecessor(predecessor);
-                        keys.into_iter().for_each(|(k, v) | r.node.set(k, v));
-                    },
-                    MessageContent::PutValues( keys) => {
-                        // Same as JoinToSuccessorAck without initializing the predecessor.
-                        keys.into_iter().for_each(|(k, v) | r.node.set(k, v));
                     },
                     MessageContent::SuccessorHeartbeat => {
                         // Check if we have a later predecessor than the node that thinks we're
@@ -413,8 +412,12 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                     if pre_node == r.node.id() {
                                         // Special case. The same node as a predecessor is actually the WORST possible one.
                                         // The sender's is better, no matter what it is.
-                                        if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValues(r.node.offload_keys_before(msg.src.0)))).await {
-                                            eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
+                                        let offload = r.node.offload_keys_before(msg.src.0);
+                                        for (k, v) in offload {
+                                            // This is inefficient, but it stops us exceeding our constant-size message length, which would happen if we had a single RPC to handle all keys.
+                                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v))).await {
+                                                eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
+                                            }
                                         }
                                         r.node.set_predecessor(msg.src);
                                     } else {
@@ -427,8 +430,12 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                 } else {
                                     if msg.src.0 != pre_node {
                                         // The sender is a closer predecessor than what we have marked.
-                                        if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValues(r.node.offload_keys_before(msg.src.0)))).await {
-                                            eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
+                                        let offload = r.node.offload_keys_before(msg.src.0);
+                                        for (k, v) in offload {
+                                            // This is inefficient, but it stops us exceeding our constant-size message length, which would happen if we had a single RPC to handle all keys.
+                                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v))).await {
+                                                eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
+                                            }
                                         }
                                         r.node.set_predecessor(msg.src);
                                     } // Otherwise we still have the same predecessor.

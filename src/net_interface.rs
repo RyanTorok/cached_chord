@@ -10,14 +10,14 @@ const PORT: u16 = 8080;
 
 pub async fn run_inbox(inbox: Sender<ChordMessage>, ip: Ipv4Addr) {
     let listener = TcpListener::bind(format!("{}:{}", ip, PORT)).await.expect("Error: could not bind to TCP port.");
-    let mut buf = [0u8; 257];
+    let mut buf = [0u8; 513];
     loop {
         match listener.accept().await {
             Ok((mut socket, _)) => {
                 let read = match socket.read(&mut buf).await {
                     Ok(n) => {
                         if n > buf.len() - 1 {
-                            panic!("Error: Inbox read buffer is not set large enough. This is a bug.")
+                            panic!("Error: Inbox read buffer is not set large enough. This is a bug. Message source: {}", socket.peer_addr().unwrap())
                         }
                         inbox.send(match bincode::deserialize(&buf[0..n]) {
                             Ok(msg) => msg,

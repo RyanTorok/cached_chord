@@ -34,7 +34,11 @@ impl Node {
 
     pub fn print_status(&self) {
         let key_range = self.store.keys().min().map_or_else(|| None, |min| self.store.keys().max().map(|max| (min.0, max.0)));
-        println!("[Node {} status: Address = {}, key_range: {:?} predecessor: {:?}, successor = {:?}, cache_stats: {}]", self.id, self.address, key_range, self.predecessor, self.successor, self.stats)
+        println!("[Node {} status: Address = {}, key_range: {:?} predecessor: {:?}, successor = {:?}, cache_stats: {}]", self.id, self.address, key_range, self.predecessor, self.successor, self.stats);
+        println!("[Fingers]");
+        for (delta, (node, addr, range)) in self.finger_table.iter() {
+            println!("[{}]: Node {}, storing key range ({}..{})", delta.wrapping_add(self.id), *node, range.start, range.end);
+        }
     }
 
     pub fn set(&mut self, key: ContentId, value: Value) {
@@ -86,17 +90,14 @@ impl Node {
         } else {
             // Cache miss.
             self.stats.miss();
-            match self.finger_table.iter().rev().find(|ent| *ent.0 < target.0) {
+            // Find the largest delta such that the finger node is between us and the target.
+            match self.finger_table.iter().rev().find(|ent| between_mod_id(self.id, ent.0.wrapping_add(self.id), target.0)) {
                 None => {
                     // No luck in the finger table (this can happen nominally in some degenerate cases like
                     // a single node or when first initializing the finger table).
                     let err = FindResult::Error("No available finger pointer.".to_string());
                     if let Some(successor) = self.successor {
-                        if successor.0 < target.0 {
-                            FindResult::Redirect(successor.1)
-                        } else {
-                            err
-                        }
+                        FindResult::Redirect(successor.1)
                     } else {
                         err
                     }
@@ -109,7 +110,7 @@ impl Node {
     }
 
     pub fn populate_finger(&mut self, finger_key: NodeId, f_node: NodeId, f_addr: Address, key_range: Range<NodeId>) -> usize {
-        self.finger_table.insert(finger_key, (f_node, f_addr, key_range));
+        self.finger_table.insert(finger_key.wrapping_sub(self.id), (f_node, f_addr, key_range));
         self.finger_table.len()
     }
 
