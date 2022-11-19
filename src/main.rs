@@ -125,5 +125,5 @@ async fn main() {
     tokio::spawn(run_outbox(outbox, args.verbose));
     tokio::spawn(send_heartbeat_triggers(clone_inbox, HEARTBEAT_INTERVAL));
     tokio::spawn(send_fix_fingers_triggers(clone_inbox_2, FIX_FINGER_INTERVAL));
-    tokio::spawn(run_node(r, activation)).await.expect("Error: run_node should never return.");
+    tokio::spawn(run_node(r, activation, args.keys)).await.expect("Error: run_node should never return.");
 }

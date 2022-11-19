@@ -1,6 +1,8 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap};
 use std::collections::btree_map::BTreeMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::mem::size_of;
 use std::ops::Range;
 use std::time::Duration;
@@ -84,25 +86,29 @@ fn split_u64(n: u64) -> (NodeId, ContentStub) {
 }
 
 // Submits requests for keys to a single node according to the given distribution
-pub async fn run_requests(requests: u64, node_addr: Address, tx: Sender<ChordMessage>, dist: Distribution, zipf_param: f64, activation: oneshot::Receiver<()>) {
+pub async fn run_requests(requests: u64, node_addr: Address, tx: Sender<ChordMessage>, dist: Distribution, zipf_param: f64, activation: oneshot::Receiver<()>, keys: u64) {
     activation.await.expect("Receive error on activation oneshot() channel.");
-    let keys = u64::MAX;
     for request_id in 0..requests {
         let sink = FutureValue::new();
-        tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(
-            match dist {
-                Distribution::Uniform => {
-                    // ThreadRng is not `Send` because it relies on thread-specific mechanics,
-                    // so we need a new handle each time so no ThreadRng instance crosses an `await`.
-                    let mut rng = rand::thread_rng();
-                    split_u64(rng.gen_range(0..keys))
-                }
-                Distribution::Zipf => {
-                    let mut rng = rand::thread_rng();
-                    let zipf = zipf::ZipfDistribution::new(keys.try_into().expect("Number of keys too large for CPU registers."), zipf_param).expect("Error setting up Zipf distribution.");
-                    split_u64(zipf.sample(&mut rng).try_into().expect("Zipf sample too large for a u64."))
-                }
-            },
+        let mut key_file = File::open("keys").expect("Could not open key file.");
+        let key_index = match dist {
+            Distribution::Uniform => {
+                // ThreadRng is not `Send` because it relies on thread-specific mechanics,
+                // so we need a new handle each time so no ThreadRng instance crosses an `await`.
+                let mut rng = rand::thread_rng();
+                rng.gen_range(0..keys)
+            }
+            Distribution::Zipf => {
+                let mut rng = rand::thread_rng();
+                let zipf = zipf::ZipfDistribution::new(keys.try_into().expect("Number of keys too large for CPU registers."), zipf_param).expect("Error setting up Zipf distribution.");
+                zipf.sample(&mut rng).try_into().expect("Zipf sample too large for a u64.")
+            }
+        };
+        key_file.seek(SeekFrom::Start(size_of::<ContentId>() as u64 * key_index)).expect("Could not seek to key index in keyfile.");
+        let mut key_buf = [0u8; 8];
+        key_file.read(&mut key_buf).expect("Could not read key from keyfile.");
+        let key = split_u64(u64::from_le_bytes(key_buf));
+        tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(key,
             ClientOperation::Put([
                 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
             ])
@@ -136,8 +142,8 @@ pub async fn send_fix_fingers_triggers(inbox: Sender<ChordMessage>, interval: Du
     }
 }
 
-pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>) {
-    tokio::spawn(run_requests(r.requests, r.node.address(), r.outgoing.clone(), r.distribution, r.zipf_param, activation));
+pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>, n_keys: u64) {
+    tokio::spawn(run_requests(r.requests, r.node.address(), r.outgoing.clone(), r.distribution, r.zipf_param, activation, n_keys));
     if r.node.id() == MASTER_NODE {
         // We're the master node. That means we start first (by assumption), making us our own
         // predecessor and successor.
