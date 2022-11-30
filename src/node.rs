@@ -164,10 +164,32 @@ pub enum CacheType {
     LFU
 }
 
+impl CacheType {
+    pub fn to_string(&self) -> &'static str {
+        match self {
+            CacheType::None => "none",
+            CacheType::LRU => "lru",
+            CacheType::MRU => "mru",
+            CacheType::FIFO => "fifo",
+            CacheType::LIFO => "lifo",
+            CacheType::LFU => "lfu"
+        }
+    }
+}
+
 #[derive(clap::ValueEnum, Clone, Debug, Copy)]
 pub enum Distribution {
     Uniform,
     Zipf
+}
+
+impl Distribution {
+    pub fn to_string(&self, zipf_param: f64) -> String {
+        match self {
+            Distribution::Uniform => String::from("uniform"),
+            Distribution::Zipf => format!("zipf({})", zipf_param)
+        }
+    }
 }
 
 #[derive(Ord, Eq)]

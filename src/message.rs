@@ -1,8 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use crate::node::FindResult;
-use crate::{Address, ContentId, NodeId, Value};
+use crate::{Address, ContentId, NodeId, RequestId, Value};
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,7 +17,7 @@ impl ChordMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MessageContent {
-    ClientRequest(ContentId, ClientOperation), // Represents a new request given by the client.
+    ClientRequest(RequestId, ContentId, ClientOperation), // Represents a new request given by the client.
     Find(ContentId),
     FindResponse(ContentId, FindResult),
     PutValue(ContentId, Value),
@@ -37,35 +34,6 @@ pub enum MessageContent {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientOperation {
-    Get(FutureValue),
+    Get(RequestId),
     Put(Value)
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FutureValue {
-    val: Option<Value>
-}
-
-impl FutureValue {
-
-    pub fn new() -> FutureValue {
-        FutureValue {
-            val: None
-        }
-    }
-
-    pub fn complete(&mut self, v: Value) {
-        self.val = Some(v);
-    }
-}
-
-impl Future for FutureValue {
-    type Output = Value;
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.val {
-            None => Poll::Pending,
-            Some(v) => Poll::Ready(v)
-        }
-    }
 }

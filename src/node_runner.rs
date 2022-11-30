@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap};
 use std::collections::btree_map::BTreeMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::ops::Range;
 use std::time::Duration;
@@ -12,15 +12,17 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::Receiver;
 use crate::{Address, CacheType, ContentId, ContentStub, Distribution, MASTER_NODE, NodeId, RequestId, Value};
 use crate::node::{between_mod_id, FindResult, Node};
-use crate::message::{ChordMessage, ClientOperation, FutureValue, MessageContent};
+use crate::message::{ChordMessage, ClientOperation, MessageContent};
 use rand::distributions::Distribution as RngDistribution;
+use tokio::time::Instant;
 
 pub const BUFFER_SIZE: usize = 128;
+pub const DUMMY_VALUE: Value = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32];
 
 pub struct SingleNodeRunner {
     node: Node,
     keys: u64,
-    gets_in_transit: HashMap<ContentId, Vec<(FutureValue, u64)>>,
+    gets_in_transit: HashMap<ContentId, Vec<(RequestId, u64)>>,
     puts_in_transit: HashMap<ContentId, (Value, u64)>,
     // Used only for Master
     successor_table: BTreeMap<NodeId, (Address, (NodeId, Address))>,
@@ -32,7 +34,7 @@ pub struct SingleNodeRunner {
     op_count: u64,
     master_ip: Address,
     verbose: bool,
-    activation: Option<oneshot::Sender<()>>
+    activation: Option<oneshot::Sender<()>>,
 }
 
 impl SingleNodeRunner {
@@ -67,7 +69,7 @@ impl SingleNodeRunner {
             op_count: 0u64,
             master_ip,
             verbose,
-            activation: Some(act_tx)
+            activation: Some(act_tx),
         }, in_tx, out_rx, act_rx)
     }
 }
@@ -86,11 +88,44 @@ fn split_u64(n: u64) -> (NodeId, ContentStub) {
 }
 
 // Submits requests for keys to a single node according to the given distribution
-pub async fn run_requests(requests: u64, node_addr: Address, tx: Sender<ChordMessage>, dist: Distribution, zipf_param: f64, activation: oneshot::Receiver<()>, keys: u64) {
+pub async fn run_requests(
+    n_writes: u64,
+    n_reads: u64,
+    node_addr: Address,
+    tx: Sender<ChordMessage>,
+    mut rx: Receiver<(RequestId, Value)>,
+    dist: Distribution,
+    zipf_param: f64,
+    activation: oneshot::Receiver<()>,
+    keys: u64,
+    node_id: NodeId,
+    cache_type: &'static str,
+    cache_size: usize
+) {
+    let mut latency_stats: (u128, RequestId) = (0, 0);
     activation.await.expect("Receive error on activation oneshot() channel.");
-    for request_id in 0..requests {
-        let sink = FutureValue::new();
-        let mut key_file = File::open("keys").expect("Could not open key file.");
+    let mut key_file = File::open("keys").expect("Could not open key file.");
+
+    let mut read_key = |key_index| {
+        key_file.seek(SeekFrom::Start(size_of::<ContentId>() as u64 * key_index)).expect("Could not seek to key index in keyfile.");
+        let mut key_buf = [0u8; 8];
+        key_file.read(&mut key_buf).expect("Could not read key from keyfile.");
+        split_u64(u64::from_le_bytes(key_buf))
+    };
+
+    // Execute writes
+    for write_id in 0..n_writes {
+        let key_index = u64::from(node_id) + write_id;
+        let key = read_key(key_index);
+        tx.send(ChordMessage::new((u32::MAX, Default::default()), node_addr,
+                                  MessageContent::ClientRequest(write_id, key, ClientOperation::Put(DUMMY_VALUE)))
+        ).await.expect("Tokio send error when sending the client write request.");
+    }
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    // Execute reads
+    for request_id in 0..n_reads {
         let key_index = match dist {
             Distribution::Uniform => {
                 // ThreadRng is not `Send` because it relies on thread-specific mechanics,
@@ -104,16 +139,35 @@ pub async fn run_requests(requests: u64, node_addr: Address, tx: Sender<ChordMes
                 zipf.sample(&mut rng).try_into().expect("Zipf sample too large for a u64.")
             }
         };
-        key_file.seek(SeekFrom::Start(size_of::<ContentId>() as u64 * key_index)).expect("Could not seek to key index in keyfile.");
-        let mut key_buf = [0u8; 8];
-        key_file.read(&mut key_buf).expect("Could not read key from keyfile.");
-        let key = split_u64(u64::from_le_bytes(key_buf));
+        let key = read_key(key_index);
+        let start = Instant::now();
+        tx.send(ChordMessage::new((u32::MAX, Default::default()), node_addr,
+                                  MessageContent::ClientRequest(request_id, key, ClientOperation::Get(request_id)))
+        ).await.expect("Tokio send error when sending the client read request.");
+        let (req, _value) = rx.recv().await.expect("Tokio receive error on getting read request answer.");
+        if req != request_id {
+            eprintln!("Error: returned request ID does not match outgoing request ID. In = {}, Out = {}", request_id, req);
+        }
+        // Add latency to our running average
+        latency_stats.0 = (latency_stats.0 * u128::from(latency_stats.1) + start.elapsed().as_micros()) / u128::from(latency_stats.1 + 1);
+        latency_stats.1 += 1;
+        /*
         tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(key,
             ClientOperation::Put([
                 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
             ])
         ))).await // Await because we don't want to send the next request until this one actually gets added to the send queue.
             .expect("Tokio send error when sending the request.")
+         */
+    }
+    let stats = format!("<{}, {}, {}, {}, {}>", latency_stats.0, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
+    match std::fs::OpenOptions::new().write(true).append(true).open("stats.csv") {
+        Ok(mut csv) => {
+            csv.write_all(stats.as_bytes()).expect("Could not write to csv file.");
+        }
+        Err(i) => {
+            eprintln!("Error: could not open csv file to report stats.");
+        }
     }
 }
 
@@ -142,8 +196,9 @@ pub async fn send_fix_fingers_triggers(inbox: Sender<ChordMessage>, interval: Du
     }
 }
 
-pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>, n_keys: u64) {
-    tokio::spawn(run_requests(r.requests, r.node.address(), r.outgoing.clone(), r.distribution, r.zipf_param, activation, n_keys));
+pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>, n_keys: u64, cache_type: &'static str, cache_size: usize) {
+    let (resp_tx, resp_rx) = mpsc::channel(1);
+    tokio::spawn(run_requests(n_keys, r.requests, r.node.address(), r.outgoing.clone(), resp_rx, r.distribution, r.zipf_param, activation, n_keys, r.node.id(), cache_type, cache_size));
     if r.node.id() == MASTER_NODE {
         // We're the master node. That means we start first (by assumption), making us our own
         // predecessor and successor.
@@ -169,7 +224,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                     println!("Incoming message from {:?}: {:?}", msg.src, msg.content);
                 }
                 match msg.content {
-                    MessageContent::ClientRequest(key, op) => {
+                    MessageContent::ClientRequest(request_id, key, op) => {
                         if r.node.inactive() {
                             let src = r.node.msg_id();
                             if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::FindResponse(key, FindResult::Error(String::from("Node is not active yet."))))).await {
@@ -181,15 +236,15 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                 _ => None
                             };
                             match op {
-                                ClientOperation::Get(out) => {
+                                ClientOperation::Get(req) => {
                                     match r.gets_in_transit.entry(key) {
                                         Entry::Occupied(mut e) => {
                                             // Add another future waiting for this key
-                                            e.get_mut().push((out, r.op_count));
+                                            e.get_mut().push((req, r.op_count));
                                         }
                                         Entry::Vacant(e) => {
                                             // Nobody waiting for this key yet. Add a new hash entry
-                                            e.insert(vec![(out, r.op_count)]);
+                                            e.insert(vec![(req, r.op_count)]);
                                         }
                                     }
                                 }
@@ -203,15 +258,14 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
 
                                     // The existing reads can't have a higher sequence number because we never awaited
                                     // since the write was received.
-                                    if let Some(futures) = r.gets_in_transit.remove(&key) {
-                                        futures.into_iter().for_each(|(mut f, _seq)| f.complete(val));
+                                    if let Some(gets) = r.gets_in_transit.remove(&key) {
+                                        for (req, _seq) in gets.into_iter() {
+                                            resp_tx.send((req, val)).await.expect("Tokio error when sending read response.")
+                                        }
                                     }
-
-
                                     if let Some(value) = r.puts_in_transit.remove(&key) {
                                         r.node.set(key, value.0);
                                     }
-
                                     // If we get here, we own the key, so we can just set the entry.
                                     if let Some(put_val) = opt_put_val {
                                         // Should be the same value, since we just added it, but we don't care
@@ -277,21 +331,22 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                             FindResult::Value(get_val, key_range) => {
                                 update_finger(key, key_range);
                                 // Found it! Respond to the request by placing the value in the future.
-                                if let Some(futures) = r.gets_in_transit.remove(&key) {
-                                    futures.into_iter().for_each(|(mut f, get_seq_num)| {
+                                if let Some(gets) = r.gets_in_transit.remove(&key) {
+                                    for (req, get_seq_num) in gets.into_iter() {
+                                        let err = "Tokio send error on completing read request.";
                                         match put_in_transit {
                                             None => {
-                                                f.complete(get_val)
+                                                resp_tx.send((req, get_val)).await.expect(err);
                                             }
                                             Some((put_val, put_seq_num)) => {
                                                 if *put_seq_num > get_seq_num {
-                                                    f.complete(*put_val)
+                                                    resp_tx.send((req, *put_val)).await.expect(err);
                                                 } else {
-                                                    f.complete(get_val)
+                                                    resp_tx.send((req, get_val)).await.expect(err);
                                                 }
                                             }
                                         }
-                                    });
+                                    }
                                 }
                                 if let Some((put_val, _)) = put_in_transit {
                                     // If we have a put in transit, send it to the node we found.
