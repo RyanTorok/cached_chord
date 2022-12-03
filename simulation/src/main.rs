@@ -43,12 +43,11 @@ struct Args {
     #[arg(long, default_value_t = 1.0)]
     zipf_param: f64,
 
-    #[arg(long, default_value_t = 25)]
+    #[arg(long, default_value_t = 60)]
     rtt: u64,
 
     #[arg(short, default_value_t = false)]
-    verbose: bool
-
+    verbose: bool,
 }
 
 fn main() {
@@ -73,8 +72,8 @@ fn main() {
     let m_err_file = File::create(Path::new(LOGS_DIR).join(Path::new(&out_dir)).join(format!("node_{}.err", MASTER_ID))).expect("Could not create node stderr file.");
     let mut master = Command::new("mm-delay").args([
         (args.rtt / 2).to_string().as_str(),
-        "sh", "-c", &format!("hostname -I; ./chord -n {} --keys {} --cache {} --cache-size {} --master-ip 0.0.0.0 --requests {} --distribution {} --zipf-param {} {}",
-                            MASTER_ID.to_string().as_str(), args.keys, args.cache.as_str(), args.cache_size.to_string().as_str(), (args.requests / args.n as u64).to_string().as_str(), args.distribution.as_str(), args.zipf_param.to_string().as_str(), if args.verbose {"-v"} else {""}),
+        "sh", "-c", &format!("hostname -I; ./chord -n {} --keys {} --cache {} --cache-size {} --master-ip 0.0.0.0 --requests {} --distribution {} --zipf-param {} {} --index {} --total {}",
+                            MASTER_ID.to_string().as_str(), args.keys, args.cache.as_str(), args.cache_size.to_string().as_str(), (args.requests / args.n as u64).to_string().as_str(), args.distribution.as_str(), args.zipf_param.to_string().as_str(), if args.verbose {"-v"} else {""}, 0, args.n),
     ]).stdout( Stdio::piped()).stderr(unsafe { Stdio::from_raw_fd(m_err_file.as_raw_fd()) }).spawn().expect(&format!("Sim error: Could not spawn child process for node {}", MASTER_ID));
 
 
@@ -87,7 +86,7 @@ fn main() {
     let master_ip = master_ip.trim();
 
     // Spawn all other nodes
-    let mut children: Vec<(Child, u32)> = (0..args.n - 1).map(|_| {
+    let mut children: Vec<(Child, u32)> = (1..args.n).map(|index| {
         std::thread::sleep(Duration::from_millis(250));
         let next_id: usize = *rand_indices.next().expect("Not enough IDs. This is a bug.");
         let next_id: u32 = next_id.try_into().expect("Node ID too large. This is a bug.");
@@ -106,7 +105,9 @@ fn main() {
             "--master-ip", master_ip,
             "--requests", (args.requests / args.n as u64).to_string().as_str(),
             "--distribution", args.distribution.as_str(),
-            "--zipf-param", args.zipf_param.to_string().as_str()
+            "--zipf-param", args.zipf_param.to_string().as_str(),
+            "--index", &index.to_string(),
+            "--total", &args.n.to_string(),
         ]);
         if args.verbose {
             command = command.arg("-v");

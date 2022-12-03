@@ -18,9 +18,9 @@ impl ChordMessage {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum MessageContent {
     ClientRequest(RequestId, ContentId, ClientOperation), // Represents a new request given by the client.
-    Find(ContentId),
-    FindResponse(ContentId, FindResult),
-    PutValue(ContentId, Value),
+    Find(ContentId, bool),
+    FindResponse(ContentId, FindResult, bool),
+    PutValue(ContentId, Value, bool),
     JoinToMaster,
     JoinToMasterResponse(NodeId, Address), // Returns successor
     JoinToSuccessor,

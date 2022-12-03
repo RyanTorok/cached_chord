@@ -100,30 +100,36 @@ pub async fn run_requests(
     keys: u64,
     node_id: NodeId,
     cache_type: &'static str,
-    cache_size: usize
+    cache_size: usize,
+    index: u32,
+    total: u32
 ) {
     let mut latency_stats: (u128, RequestId) = (0, 0);
     activation.await.expect("Receive error on activation oneshot() channel.");
     let mut key_file = File::open("keys").expect("Could not open key file.");
 
     let mut read_key = |key_index| {
-        key_file.seek(SeekFrom::Start(size_of::<ContentId>() as u64 * key_index)).expect("Could not seek to key index in keyfile.");
+        key_file.seek(SeekFrom::Start(8u64 * key_index)).expect("Could not seek to key index in keyfile.");
         let mut key_buf = [0u8; 8];
         key_file.read(&mut key_buf).expect("Could not read key from keyfile.");
         split_u64(u64::from_le_bytes(key_buf))
     };
 
+    tokio::time::sleep(Duration::from_secs(60)).await;
+
+    println!("Starting write requests!");
     // Execute writes
     for write_id in 0..n_writes {
-        let key_index = u64::from(node_id) + write_id;
+        let key_index = u64::from(index) + write_id;
         let key = read_key(key_index);
+        println!("Writing key = {:?}", key);
         tx.send(ChordMessage::new((u32::MAX, Default::default()), node_addr,
                                   MessageContent::ClientRequest(write_id, key, ClientOperation::Put(DUMMY_VALUE)))
         ).await.expect("Tokio send error when sending the client write request.");
     }
 
-    tokio::time::sleep(Duration::from_secs(10)).await;
-
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    println!("Starting read requests!");
     // Execute reads
     for request_id in 0..n_reads {
         let key_index = match dist {
@@ -131,7 +137,7 @@ pub async fn run_requests(
                 // ThreadRng is not `Send` because it relies on thread-specific mechanics,
                 // so we need a new handle each time so no ThreadRng instance crosses an `await`.
                 let mut rng = rand::thread_rng();
-                rng.gen_range(0..keys)
+                rng.gen_range(0..u64::from(total))
             }
             Distribution::Zipf => {
                 let mut rng = rand::thread_rng();
@@ -149,8 +155,9 @@ pub async fn run_requests(
             eprintln!("Error: returned request ID does not match outgoing request ID. In = {}, Out = {}", request_id, req);
         }
         // Add latency to our running average
-        latency_stats.0 = (latency_stats.0 * u128::from(latency_stats.1) + start.elapsed().as_micros()) / u128::from(latency_stats.1 + 1);
+        latency_stats.0 = (latency_stats.0 * u128::from(latency_stats.1) + start.elapsed().as_millis()) / u128::from(latency_stats.1 + 1);
         latency_stats.1 += 1;
+        println!("Read request {} returned in {} ms.", request_id, start.elapsed().as_millis());
         /*
         tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(key,
             ClientOperation::Put([
@@ -160,7 +167,7 @@ pub async fn run_requests(
             .expect("Tokio send error when sending the request.")
          */
     }
-    let stats = format!("<{}, {}, {}, {}, {}>", latency_stats.0, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
+    let stats = format!("<{}, {}, {}, {}, {}, {}>", node_id, latency_stats.0, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
     match std::fs::OpenOptions::new().write(true).append(true).open("stats.csv") {
         Ok(mut csv) => {
             csv.write_all(stats.as_bytes()).expect("Could not write to csv file.");
@@ -183,11 +190,26 @@ pub async fn send_heartbeat_triggers(inbox: Sender<ChordMessage>, interval: Dura
 
 pub async fn send_fix_fingers_triggers(inbox: Sender<ChordMessage>, interval: Duration) {
     let mut delta: NodeId = 1;
+    let send_ff = || {
+    };
+    let mut ticks = 0;
     let mut timer = tokio::time::interval(interval);
+    while ticks < 120 {
+        timer.tick().await;
+        inbox.send(ChordMessage::new((u32::MAX, Default::default()), Default::default(), MessageContent::FixFingerTimerExpired(delta))).await
+            .expect("Error: Could not send FixFingerTimerExpired message to inbox.");
+        if delta >= NodeId::MAX / 2 {
+            delta = 1;
+        } else {
+            delta *= 2;
+        }
+        ticks += 1;
+    }
+    timer = tokio::time::interval(interval.mul_f64(10.0));
     loop {
         timer.tick().await;
         inbox.send(ChordMessage::new((u32::MAX, Default::default()), Default::default(), MessageContent::FixFingerTimerExpired(delta))).await
-            .expect("Error: Could not send HeartbeatTimerExpired message to inbox.");
+            .expect("Error: Could not send FixFingerTimerExpired message to inbox.");
         if delta >= NodeId::MAX / 2 {
             delta = 1;
         } else {
@@ -196,9 +218,32 @@ pub async fn send_fix_fingers_triggers(inbox: Sender<ChordMessage>, interval: Du
     }
 }
 
-pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>, n_keys: u64, cache_type: &'static str, cache_size: usize) {
+pub async fn run_node(
+    mut r: SingleNodeRunner,
+    activation: oneshot::Receiver<()>,
+    n_keys: u64,
+    cache_type: &'static str,
+    cache_size: usize,
+    index: u32,
+    total: u32
+) {
     let (resp_tx, resp_rx) = mpsc::channel(1);
-    tokio::spawn(run_requests(n_keys, r.requests, r.node.address(), r.outgoing.clone(), resp_rx, r.distribution, r.zipf_param, activation, n_keys, r.node.id(), cache_type, cache_size));
+    tokio::spawn(run_requests(
+        n_keys,
+        r.requests,
+        r.node.address(),
+        r.outgoing.clone(),
+        resp_rx,
+        r.distribution,
+        r.zipf_param,
+        activation,
+        n_keys,
+        r.node.id(),
+        cache_type,
+        cache_size,
+        index,
+        total
+    ));
     if r.node.id() == MASTER_NODE {
         // We're the master node. That means we start first (by assumption), making us our own
         // predecessor and successor.
@@ -227,7 +272,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                     MessageContent::ClientRequest(request_id, key, op) => {
                         if r.node.inactive() {
                             let src = r.node.msg_id();
-                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::FindResponse(key, FindResult::Error(String::from("Node is not active yet."))))).await {
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::FindResponse(key, FindResult::Error(String::from("Node is not active yet.")), false))).await {
                                 eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
                             }
                         } else {
@@ -252,7 +297,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                     r.puts_in_transit.insert(key, (val, r.op_count));
                                 }
                             }
-                            match r.node.next_finger(key) {
+                            match r.node.next_finger(key, msg.src.0) {
                                 FindResult::Value(val, _key_range) => {
                                     // Complete all futures waiting on that key
 
@@ -274,10 +319,14 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                     }
                                 }
                                 FindResult::Redirect(next) => {
-                                    println!("First redirect for key ({}, {}) to address {}", key.0, key.1, next.to_string());
-                                    let src = r.node.msg_id();
-                                    if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(key))).await {
-                                        eprintln!("Error: Could not send Find message because of error '{}'", e);
+                                    //println!("First redirect for key ({}, {}) to address {}", key.0, key.1, next.to_string());
+                                    if next != r.node.address() {
+                                        let src = r.node.msg_id();
+                                        if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(key, false))).await {
+                                            eprintln!("Error: Could not send Find message because of error '{}'", e);
+                                        }
+                                    } else {
+                                        panic!("Should not have finger pointer to self.");
                                     }
                                 }
                                 FindResult::Error(e) => {
@@ -298,26 +347,27 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                             }
                         }
                     },
-                    MessageContent::Find(key) => {
+                    MessageContent::Find(key, internal) => {
                         let src = r.node.msg_id();
                         if r.node.inactive() {
-                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::FindResponse(key, FindResult::Error(String::from("Node is not active yet."))))).await {
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::FindResponse(key, FindResult::Error(String::from("Node is not active yet.")), internal))).await {
                                 eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
                             }
                         } else {
                             // Find the key (returns either the value or a redirect address), and send that back
-                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::FindResponse(key, r.node.next_finger(key)))).await {
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::FindResponse(key, r.node.next_finger(key, msg.src.0), internal))).await {
                                 eprintln!("Error: Could not send FindResponse message because of error '{}'", e);
                             }
                         }
                     },
-                    MessageContent::FindResponse(key, result) => {
+                    MessageContent::FindResponse(key, result, internal) => {
                         let me = r.node.msg_id();
                         let mut update_finger = |key: ContentId, key_range: Range<NodeId>| {
                             let diff_key = key.0.wrapping_sub(me.0) as f64;
                             if diff_key.log2().floor() == diff_key.log2().ceil() {
                                 // We got a key that was a power of 2 away from our node, possibly from fix_finger().
                                 // We can use it to update our finger table.
+                                //println!("Updating finger: key: {}, node: {}", key.0, msg.src.0);
                                 let size_so_far = r.node.populate_finger(key.0, msg.src.0, msg.src.1, key_range);
                                 if r.node.inactive() && size_so_far >= size_of::<NodeId>() / 2 {
                                     // We've fully populated our table. Our node is ready for prime time!
@@ -350,34 +400,60 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                 }
                                 if let Some((put_val, _)) = put_in_transit {
                                     // If we have a put in transit, send it to the node we found.
-                                    if let Err(e) = r.outgoing.send(ChordMessage::new(me, msg.src.1, MessageContent::PutValue(key, *put_val))).await {
+                                    println!("Found the right place to put!");
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(me, msg.src.1, MessageContent::PutValue(key, *put_val, false))).await {
                                         eprintln!("Error: Could not send PutValue message because of error '{}'", e);
                                     }
+                                    r.puts_in_transit.remove(&key);
                                 }
                                 // Put the key into our cache
                                 r.node.cache_key(key, msg.src.1)
+
                             }
                             FindResult::Redirect(next) => {
                                 let src = r.node.msg_id();
-                                if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(key))).await {
-                                    eprintln!("Error: Could not send Find message because of error '{}'", e);
+                                if next != r.node.address() {
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(key, internal))).await {
+                                        eprintln!("Error: Could not send Find message because of error '{}'", e);
+                                    }
+                                } else {
+                                    if r.verbose {
+                                        println!("Redirected to self. Try successor instead.");
+                                    }
+                                    let opt_successor = r.node.successor();
+                                    match opt_successor {
+                                        None => {
+                                            eprintln!("No successor to fall back to.");
+                                        }
+                                        Some(s) => {
+
+                                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, s.1, MessageContent::Find(key, internal))).await {
+                                                eprintln!("Error: Could not send Find message because of error '{}'", e);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             FindResult::Error(e) => {
                                 eprintln!("Find error (Node = {}, Requested key = (node: {}, stub: {})): {}", r.node.id(), key.0, key.1, e);
                             }
                             FindResult::NoSuchEntry(key_range) => {
+                                if !internal {
+                                    eprintln!("Error: key not found: ({}, {})", key.0, key.1);
+                                }
                                 update_finger(key, key_range);
                                 if let Some((put_val, _)) = put_in_transit {
                                     // If we have a put in transit, send it to the node we found.
-                                    if let Err(e) = r.outgoing.send(ChordMessage::new(me, msg.src.1, MessageContent::PutValue(key, *put_val))).await {
+                                    println!("Found the right place to put 2! key = {:?}", key);
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(me, msg.src.1, MessageContent::PutValue(key, *put_val, false))).await {
                                         eprintln!("Error: Could not send PutValue message because of error '{}'", e);
                                     }
+                                    r.puts_in_transit.remove(&key);
                                 }
                             }
                         }
                     },
-                    MessageContent::PutValue(key, value) => {
+                    MessageContent::PutValue(key, value, offload) => {
                         r.node.set(key, value);
                     },
                     MessageContent::JoinToMaster => {
@@ -391,16 +467,37 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                             }).map(|(n, (a, (sn, sa)))| (*n, *a))
                                 .expect("There must be at least one key in the successor table if we get here.");
 
+                            // If we are the new node's successor, set it as our own predecessor.
+                            if s_node == MASTER_NODE {
+                                r.node.set_predecessor(msg.src);
+
+                                let send_keys = r.node.offload_keys_before(msg.src.0);
+                                // Send one at a time to avoid overflowing simulated constant-size network buffer.
+                                let src = r.node.msg_id();
+                                for (k, v) in send_keys {
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v, true))).await {
+                                        eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
+                                    }
+                                }
+                            }
+
                             // Add previous node's successor
                             // Add new node's successor
                             let (p_node, p_addr) = r.successor_table.iter().min_by(|(me, _), (other, _)| {
-                                // Notice the subtraction is reversed here from above. wrapping_add() calls make the same node as a predecessor rank last, not first.
+                                // Notice the subtraction is reversed here from above.
                                 new_node_id.wrapping_sub(**me).cmp(&new_node_id.wrapping_sub(**other))
                             }).map(|(n, (a, (sn, sa)))| (*n, *a))
                                 .expect("There must be at least one key in the successor table if we get here.");
 
                             r.successor_table.insert(msg.src.0, (msg.src.1, (s_node, s_addr)));
                             r.successor_table.insert(p_node, (p_addr, msg.src));
+
+                            // If we are the new node's predecessor, set it as our own successor.
+                            // This optimization is useful for eval because otherwise the Master successor
+                            // takes O(n) time to converge.
+                            if p_node == MASTER_NODE {
+                                r.node.set_successor(msg.src);
+                            }
 
                             if r.verbose {
                                 println!("Master: new node with ID {}. Its successor is {} and predecessor is {}.", msg.src.0, s_node, p_node);
@@ -414,7 +511,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                     },
                     MessageContent::JoinToMasterResponse(s_node, s_addr) => {
                         // Mark the new node as our successor
-                        println!("Setting successor as {}", s_node);
+                        //println!("Setting successor as {}", s_node);
                         r.node.set_successor((s_node, s_addr));
                         // Tell new successor about us
                         let src = r.node.msg_id();
@@ -430,7 +527,9 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                             // We can just set the content stub to 0.
                             // We want this to overflow, e.g. the successor of node 2^32 - 1 is node 0.
                             let next_node = r.node.id().wrapping_add(curr);
-                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, dest, MessageContent::Find((next_node, 0)))).await {
+                            // This is technically internal, but we want to make sure the node activates. The `internal` flag is just to make sure we don't get stuck forever trying to update
+                            // finger pointers.
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, dest, MessageContent::Find((next_node, 0), false))).await {
                                 eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
                             }
                             // Can't use normal while condition here because we'd overflow before we failed the condition.
@@ -450,12 +549,12 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                             if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::JoinToSuccessorAck(pred))).await {
                                 eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
                             }
-                            let send_keys = r.node.offload_keys_before(msg.src.0);
-                            // Send one at a time to avoid overflowing simulated constant-size network buffer.
-                            for (k, v) in send_keys {
-                                if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v))).await {
-                                    eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
-                                }
+                        }
+                        let send_keys = r.node.offload_keys_before(msg.src.0);
+                        // Send one at a time to avoid overflowing simulated constant-size network buffer.
+                        for (k, v) in send_keys {
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v, true))).await {
+                                eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
                             }
                         }
                     },
@@ -476,7 +575,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                         let offload = r.node.offload_keys_before(msg.src.0);
                                         for (k, v) in offload {
                                             // This is inefficient, but it stops us exceeding our constant-size message length, which would happen if we had a single RPC to handle all keys.
-                                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v))).await {
+                                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v, true))).await {
                                                 eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
                                             }
                                         }
@@ -494,7 +593,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                                         let offload = r.node.offload_keys_before(msg.src.0);
                                         for (k, v) in offload {
                                             // This is inefficient, but it stops us exceeding our constant-size message length, which would happen if we had a single RPC to handle all keys.
-                                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v))).await {
+                                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, msg.src.1, MessageContent::PutValue(k, v, true))).await {
                                                 eprintln!("Error: Could not send SuccessorHeartbeatNewSuccessor message because of error '{}'", e);
                                             }
                                         }
@@ -512,7 +611,7 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                     },
                     MessageContent::SuccessorHeartbeatAck => {}, // This is a No-op
                     MessageContent::SuccessorHeartbeatNewSuccessor(s_node, s_addr) => {
-                        println!("Changing successor from {} to {}.", r.node.successor().map_or_else(|| String::from("nothing"), |(a, b)| a.to_string()), s_node);
+                        //println!("Changing successor from {} to {}.", r.node.successor().map_or_else(|| String::from("nothing"), |(a, b)| a.to_string()), s_node);
                         r.node.set_successor((s_node, s_addr))
                     }
                     MessageContent::HeartbeatTimerExpired => {
@@ -530,13 +629,18 @@ pub async fn run_node(mut r: SingleNodeRunner, activation: oneshot::Receiver<()>
                     MessageContent::FixFingerTimerExpired(delta) => {
                         let src = r.node.msg_id();
                         let dummy_key = (src.0.wrapping_add(delta), 0);
-                        match r.node.next_finger(dummy_key) {
+                        match r.node.next_finger(dummy_key, msg.src.0) {
                             FindResult::Value(..) | FindResult::NoSuchEntry(..) => {
                                 // We redirected to ourself. There's nothing to put in the finger table.
                             }
                             FindResult::Redirect(next) => {
-                                if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(dummy_key))).await {
-                                    eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
+                                if next != r.node.address() {
+                                    if let Err(e) = r.outgoing.send(ChordMessage::new(src, next, MessageContent::Find(dummy_key, true))).await {
+                                        eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
+                                    }
+                                } else {
+                                    // We redirected to ourself. This is a bug.
+                                    eprintln!("Should not have finger pointer to self.")
                                 }
                             }
                             FindResult::Error(e) => {

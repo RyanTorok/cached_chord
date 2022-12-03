@@ -37,7 +37,7 @@ impl Node {
         println!("[Node {} status: Address = {}, key_range: {:?} predecessor: {:?}, successor = {:?}, cache_stats: {}]", self.id, self.address, key_range, self.predecessor, self.successor, self.stats);
         println!("[Fingers]");
         for (delta, (node, addr, range)) in self.finger_table.iter() {
-            println!("[{}]: Node {}, storing key range ({}..{})", delta.wrapping_add(self.id), *node, range.start, range.end);
+            println!("[del = {}, key = {}]: Node {}, storing key range ({}..{})", delta, delta.wrapping_add(self.id), *node, range.start, range.end);
         }
     }
 
@@ -76,11 +76,13 @@ impl Node {
 
     // This function takes &mut self because it allows us to avoid using a RefCell inside the caches
     // that update internal state on a read (e.g. LRU)
-    pub fn next_finger(&mut self, target: ContentId) -> FindResult {
+    pub fn next_finger(&mut self, target: ContentId, src: NodeId) -> FindResult {
         if self.responsible_for(target) {
-            let key_range = self.predecessor.unwrap().0..self.id;
+            let key_range = (self.predecessor.unwrap().0 + 1)..(self.id + 1);
             match self.store.get(&target) {
-                None => FindResult::NoSuchEntry(key_range),
+                None => {
+                    FindResult::NoSuchEntry(key_range)
+                },
                 Some(val) => FindResult::Value(*val, key_range)
             }
         } else if let Some(addr) = self.cache.get(target) {
@@ -97,7 +99,17 @@ impl Node {
                     // a single node or when first initializing the finger table).
                     let err = FindResult::Error("No available finger pointer.".to_string());
                     if let Some(successor) = self.successor {
-                        FindResult::Redirect(successor.1)
+                        if successor.0 == src {
+                            // Don't want to redirect to same node who asked us, so do the predecessor instead.
+                            if let Some(predecessor) = self.predecessor {
+                                FindResult::Redirect(predecessor.1)
+                            } else {
+                                // Just give up and do a self-redirect
+                                FindResult::Redirect(successor.1)
+                            }
+                        } else {
+                            FindResult::Redirect(successor.1)
+                        }
                     } else {
                         err
                     }
