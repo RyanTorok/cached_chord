@@ -3,4 +3,5 @@
 /Cargo.lock
 /simulation/target
 /simulation/logs
-keys
+/keys
+/*.csv

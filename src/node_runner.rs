@@ -104,7 +104,7 @@ pub async fn run_requests(
     index: u32,
     total: u32
 ) {
-    let mut latency_stats: (u128, RequestId) = (0, 0);
+    let mut latency_stats: (u128, _) = (0, 0);
     activation.await.expect("Receive error on activation oneshot() channel.");
     let mut key_file = File::open("keys").expect("Could not open key file.");
 
@@ -141,8 +141,8 @@ pub async fn run_requests(
             }
             Distribution::Zipf => {
                 let mut rng = rand::thread_rng();
-                let zipf = zipf::ZipfDistribution::new(keys.try_into().expect("Number of keys too large for CPU registers."), zipf_param).expect("Error setting up Zipf distribution.");
-                zipf.sample(&mut rng).try_into().expect("Zipf sample too large for a u64.")
+                let zipf = zipf::ZipfDistribution::new(total.try_into().unwrap(), zipf_param).expect("Error setting up Zipf distribution.");
+                zipf.sample(&mut rng).try_into().unwrap()
             }
         };
         let key = read_key(key_index);
@@ -154,10 +154,13 @@ pub async fn run_requests(
         if req != request_id {
             eprintln!("Error: returned request ID does not match outgoing request ID. In = {}, Out = {}", request_id, req);
         }
-        // Add latency to our running average
-        latency_stats.0 = (latency_stats.0 * u128::from(latency_stats.1) + start.elapsed().as_millis()) / u128::from(latency_stats.1 + 1);
-        latency_stats.1 += 1;
-        println!("Read request {} returned in {} ms.", request_id, start.elapsed().as_millis());
+        // Add latency to our running average. Ignore the first 5 readings because the startup time unfairly inflates the stats.
+        let latency = start.elapsed().as_millis();
+        if request_id >= 5 {
+            latency_stats.0 += latency;
+            latency_stats.1 += 1;
+        }
+        println!("Read request {} returned in {} ms.", request_id, latency);
         /*
         tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(key,
             ClientOperation::Put([
@@ -167,8 +170,13 @@ pub async fn run_requests(
             .expect("Tokio send error when sending the request.")
          */
     }
-    let stats = format!("<{}, {}, {}, {}, {}, {}>", node_id, latency_stats.0, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
-    match std::fs::OpenOptions::new().write(true).append(true).open("stats.csv") {
+    let avg = if latency_stats.1 != 0 {
+        latency_stats.0 / latency_stats.1
+    } else {
+        0
+    };
+    let stats = format!("<{}, {}, {}, {}, {}, {}>\n", node_id, avg, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
+    match std::fs::OpenOptions::new().create(true).write(true).append(true).open("raw_stats.csv") {
         Ok(mut csv) => {
             csv.write_all(stats.as_bytes()).expect("Could not write to csv file.");
         }
@@ -176,6 +184,8 @@ pub async fn run_requests(
             eprintln!("Error: could not open csv file to report stats.");
         }
     }
+    let mut done_file = std::fs::OpenOptions::new().write(true).append(true).open("done.txt").expect("Could not open done.txt");
+    done_file.write("done!\n".as_bytes()).expect("Could not write to done.txt");
 }
 
 pub async fn send_heartbeat_triggers(inbox: Sender<ChordMessage>, interval: Duration) {
@@ -190,8 +200,6 @@ pub async fn send_heartbeat_triggers(inbox: Sender<ChordMessage>, interval: Dura
 
 pub async fn send_fix_fingers_triggers(inbox: Sender<ChordMessage>, interval: Duration) {
     let mut delta: NodeId = 1;
-    let send_ff = || {
-    };
     let mut ticks = 0;
     let mut timer = tokio::time::interval(interval);
     while ticks < 120 {
@@ -400,7 +408,6 @@ pub async fn run_node(
                                 }
                                 if let Some((put_val, _)) = put_in_transit {
                                     // If we have a put in transit, send it to the node we found.
-                                    println!("Found the right place to put!");
                                     if let Err(e) = r.outgoing.send(ChordMessage::new(me, msg.src.1, MessageContent::PutValue(key, *put_val, false))).await {
                                         eprintln!("Error: Could not send PutValue message because of error '{}'", e);
                                     }
@@ -444,7 +451,6 @@ pub async fn run_node(
                                 update_finger(key, key_range);
                                 if let Some((put_val, _)) = put_in_transit {
                                     // If we have a put in transit, send it to the node we found.
-                                    println!("Found the right place to put 2! key = {:?}", key);
                                     if let Err(e) = r.outgoing.send(ChordMessage::new(me, msg.src.1, MessageContent::PutValue(key, *put_val, false))).await {
                                         eprintln!("Error: Could not send PutValue message because of error '{}'", e);
                                     }

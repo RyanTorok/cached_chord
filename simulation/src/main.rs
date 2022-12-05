@@ -40,7 +40,7 @@ struct Args {
     #[arg(short, long)]
     distribution: String,
 
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 1.2)]
     zipf_param: f64,
 
     #[arg(long, default_value_t = 60)]
