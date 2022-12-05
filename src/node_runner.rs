@@ -646,8 +646,8 @@ pub async fn run_node(
                                         eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
                                     }
                                 } else {
-                                    // We redirected to ourself. This is a bug.
-                                    eprintln!("Should not have finger pointer to self.")
+                                    // We redirected to ourself. This is a bug. // TODO maybe not
+                                    //eprintln!("Should not have finger pointer to self.")
                                 }
                             }
                             FindResult::Error(e) => {
