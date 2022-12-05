@@ -105,7 +105,7 @@ async fn main() {
     let args = Args::parse();
     let ip = match Ipv4Addr::from_str(String::from_utf8(Command::new("hostname").arg("-I").output()
         .expect("Error: could not read IP address with `hostname -I` command.").stdout)
-        .expect("String returned by `hostname -I` was not valid UTF-8.").trim()) {
+        .expect("String returned by `hostname -I` was not valid UTF-8.").split_whitespace().into_iter().next().unwrap().trim()) {
         Ok(ip) => ip,
         Err(e) => {
             eprintln!("ip address error: {}", e);
