@@ -334,7 +334,8 @@ pub async fn run_node(
                                             eprintln!("Error: Could not send Find message because of error '{}'", e);
                                         }
                                     } else {
-                                        panic!("Should not have finger pointer to self.");
+                                        // TODO remove this; this could happen in degenerate cases like during setup when successors haven't stabilized.
+                                        //panic!("Should not have finger pointer to self.");
                                     }
                                 }
                                 FindResult::Error(e) => {

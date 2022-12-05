@@ -5,3 +5,4 @@
 /simulation/logs
 /keys
 /*.csv
+/simulation/*.csv
