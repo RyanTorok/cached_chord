@@ -18,7 +18,7 @@ for dist in zipf uniform; do
                 else
                     node_id=$((($RANDOM + 1) * ($RANDOM + 1) * ($RANDOM % 4 + 1) - 1));
                 fi
-                cmd="timeout 400 ~/chord -n $node_id --keys $writes --cache $cache --cache-size $size --master-ip $master_ip --requests $reads --distribution $dist --index $node --total $nodes";
+                cmd="killall chord; timeout 400 ~/chord -n $node_id --keys $writes --cache $cache --cache-size $size --master-ip $master_ip --requests $reads --distribution $dist --index $node --total $nodes";
                 ssh $sshflags "pc${hosts[$node]}.emulab.net" "$cmd" &
                 pids+=($!);
             done;
