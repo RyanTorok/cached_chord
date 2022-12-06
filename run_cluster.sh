@@ -5,12 +5,13 @@ reads=1000
 hosts=(433 418 426 428 431);
 sshflags="-oStrictHostKeyChecking=no"
 for dist in zipf uniform; do
-    for cache in lru none fifo mru mfu lifo; do
+    for cache in lru none fifo mru lfu lifo; do
         for size in 10 20 50 100 200; do
             master="pc${hosts[0]}.emulab.net";
             ssh $sshflags $master "touch $donefile";
             master_ip=$(ssh $master 'hostname -I' | awk '{print $1}');
             pids=();
+            echo "Starting experiment with Cache = $cache($size), Dist = $dist"
             for node in $( seq 0 $(($nodes - 1))); do
                 if [ $node == 0 ]; then
                     node_id=0;
@@ -32,14 +33,14 @@ for dist in zipf uniform; do
                     break;
                 fi
                 alive=0
-                for pid in $pids; do
+                for pid in "${pids[@]}"; do
                     if ps -p $pid > /dev/null; then
                         alive=1
                         break;
                     fi
                 done;
                 if [ $alive == 0 ]; then
-                    break; 
+                    break;
                 fi
             done;
             ssh $master "rm $donefile";

@@ -104,7 +104,7 @@ pub async fn run_requests(
     index: u32,
     total: u32
 ) {
-    let mut latency_stats: (u128, _) = (0, 0);
+    let mut latency_stats: (f64, _) = (0.0, 0);
     activation.await.expect("Receive error on activation oneshot() channel.");
     let mut key_file = File::open("keys").expect("Could not open key file.");
 
@@ -155,12 +155,12 @@ pub async fn run_requests(
             eprintln!("Error: returned request ID does not match outgoing request ID. In = {}, Out = {}", request_id, req);
         }
         // Add latency to our running average. Ignore the first 5 readings because the startup time unfairly inflates the stats.
-        let latency = start.elapsed().as_millis();
+        let latency = start.elapsed().as_micros() as f64 / 1000.0;
         if request_id >= 5 {
             latency_stats.0 += latency;
             latency_stats.1 += 1;
         }
-        println!("Read request {} returned in {} ms.", request_id, latency);
+        println!("Read request {} returned in {:.2} ms.", request_id, latency);
         /*
         tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(key,
             ClientOperation::Put([
@@ -171,11 +171,11 @@ pub async fn run_requests(
          */
     }
     let avg = if latency_stats.1 != 0 {
-        latency_stats.0 / latency_stats.1
+        latency_stats.0 / f64::from(latency_stats.1)
     } else {
-        0
+        0.0
     };
-    let stats = format!("<{}, {}, {}, {}, {}, {}>\n", node_id, avg, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
+    let stats = format!("<{}, {:.2}, {}, {}, {}, {}>\n", node_id, avg, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
     match std::fs::OpenOptions::new().create(true).write(true).append(true).open("raw_stats.csv") {
         Ok(mut csv) => {
             csv.write_all(stats.as_bytes()).expect("Could not write to csv file.");
@@ -447,7 +447,7 @@ pub async fn run_node(
                             }
                             FindResult::NoSuchEntry(key_range) => {
                                 if !internal {
-                                    eprintln!("Error: key not found: ({}, {})", key.0, key.1);
+                                    //eprintln!("Error: key not found: ({}, {})", key.0, key.1);
                                 }
                                 update_finger(key, key_range);
                                 if let Some((put_val, _)) = put_in_transit {
@@ -534,9 +534,7 @@ pub async fn run_node(
                             // We can just set the content stub to 0.
                             // We want this to overflow, e.g. the successor of node 2^32 - 1 is node 0.
                             let next_node = r.node.id().wrapping_add(curr);
-                            // This is technically internal, but we want to make sure the node activates. The `internal` flag is just to make sure we don't get stuck forever trying to update
-                            // finger pointers.
-                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, dest, MessageContent::Find((next_node, 0), false))).await {
+                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, dest, MessageContent::Find((next_node, 0), true))).await {
                                 eprintln!("Error: Could not send inactive error for FindResponse message because of error '{}'", e);
                             }
                             // Can't use normal while condition here because we'd overflow before we failed the condition.
