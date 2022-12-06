@@ -117,19 +117,19 @@ pub async fn run_requests(
 
     tokio::time::sleep(Duration::from_secs(60)).await;
 
-    println!("Starting write requests!");
+    //println!("Starting write requests!");
     // Execute writes
     for write_id in 0..n_writes {
         let key_index = u64::from(index) + write_id;
         let key = read_key(key_index);
-        println!("Writing key = {:?}", key);
+        //println!("Writing key = {:?}", key);
         tx.send(ChordMessage::new((u32::MAX, Default::default()), node_addr,
                                   MessageContent::ClientRequest(write_id, key, ClientOperation::Put(DUMMY_VALUE)))
         ).await.expect("Tokio send error when sending the client write request.");
     }
 
     tokio::time::sleep(Duration::from_secs(60)).await;
-    println!("Starting read requests!");
+    //println!("Starting read requests!");
     // Execute reads
     for request_id in 0..n_reads {
         let key_index = match dist {
@@ -160,7 +160,7 @@ pub async fn run_requests(
             latency_stats.0 += latency;
             latency_stats.1 += 1;
         }
-        println!("Read request {} returned in {:.2} ms.", request_id, latency);
+        //println!("Read request {} returned in {:.2} ms.", request_id, latency);
         /*
         tx.send(ChordMessage::new((u32::MAX, Default::default()),node_addr, MessageContent::ClientRequest(key,
             ClientOperation::Put([
@@ -443,7 +443,9 @@ pub async fn run_node(
                                 }
                             }
                             FindResult::Error(e) => {
-                                eprintln!("Find error (Node = {}, Requested key = (node: {}, stub: {})): {}", r.node.id(), key.0, key.1, e);
+                                if !internal {
+                                    eprintln!("Find error (Node = {}, Requested key = (node: {}, stub: {})): {}", r.node.id(), key.0, key.1, e);
+                                }
                             }
                             FindResult::NoSuchEntry(key_range) => {
                                 if !internal {
