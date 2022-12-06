@@ -1,13 +1,13 @@
 donefile="done.txt"
-nodes=5
+nodes=100
 writes=100
-reads=1000
+reads=20000
 for dist in uniform zipf; do
     for cache in none lru fifo mru mfu lifo; do
         for size in 10 20 50 100 200; do
             touch $donefile
             #echo "$dist $cache $size"
-            timeout 400 cargo run --release -- -n $nodes --keys $writes --cache $cache --cache-size $size --requests $reads --distribution $dist --rtt 2 &
+            timeout 4000 cargo run --release -- -n $nodes --keys $writes --cache $cache --cache-size $size --requests $reads --distribution $dist --rtt 60 &
             pid=$!
             while true; do
                 sleep 5;

@@ -150,15 +150,28 @@ pub async fn run_requests(
         tx.send(ChordMessage::new((u32::MAX, Default::default()), node_addr,
                                   MessageContent::ClientRequest(request_id, key, ClientOperation::Get(request_id)))
         ).await.expect("Tokio send error when sending the client read request.");
-        let (req, _value) = rx.recv().await.expect("Tokio receive error on getting read request answer.");
-        if req != request_id {
-            eprintln!("Error: returned request ID does not match outgoing request ID. In = {}, Out = {}", request_id, req);
-        }
-        // Add latency to our running average. Ignore the first 5 readings because the startup time unfairly inflates the stats.
-        let latency = start.elapsed().as_micros() as f64 / 1000.0;
-        if request_id >= 5 {
-            latency_stats.0 += latency;
-            latency_stats.1 += 1;
+        let timeout = if request_id >= 5 {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(120)
+        };
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(opt_req) => {
+                let (req, _value) = opt_req.expect("Tokio receive error on read response.");
+                if req == request_id{
+                    // Add latency to our running average. Ignore the first 5 readings because the startup time unfairly inflates the stats.
+                    let latency = start.elapsed().as_micros() as f64 / 1000.0;
+                    if request_id >= 5 {
+                        latency_stats.0 += latency;
+                        latency_stats.1 += 1;
+                    }
+                } else {
+                    // old one that took too long
+                }
+            }
+            Err(e) => {
+                // timeout
+            }
         }
         //println!("Read request {} returned in {:.2} ms.", request_id, latency);
         /*
