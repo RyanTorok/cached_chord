@@ -1,7 +1,7 @@
 donefile="done.txt"
-nodes=100
+nodes=5
 writes=100
-reads=20000
+reads=1000
 for dist in uniform zipf; do
     for cache in none lru fifo mru lfu lifo; do
         for size in 10 20 50 100 200; do

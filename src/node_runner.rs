@@ -165,7 +165,7 @@ pub async fn run_requests(
                     if request_id >= 5 {
                         latency_stats.0 += latency;
                         latency_stats.1 += 1;
-                        let stats = format!("<{}, {:.2}, {}, {}, {}, {}>\n", node_id, latency, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
+                        let stats = format!("<{}, {}, {:.2}, {}, {}, {}, {}>\n", total, node_id, latency, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
                         csv.write_all(stats.as_bytes()).expect("Could not write to csv file.");
                     }
                 } else {
