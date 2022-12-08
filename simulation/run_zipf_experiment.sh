@@ -2,13 +2,14 @@ donefile="done.txt"
 nodes=100
 writes=100
 reads=20000
+size=50
 for dist in zipf; do
-    for cache in lfu; do
-        for size in 100 200; do
+    for cache in lru fifo; do
+        for zipf in 0.8 1.0 1.2 1.5 2.0 3.0; do
             touch $donefile
             #echo "$dist $cache $size"
             killall chord;
-            timeout 500 cargo run --release -- -n $nodes --keys $writes --cache $cache --cache-size $size --requests $reads --distribution $dist --rtt 60 &
+            timeout 500 cargo run --release -- -n $nodes --keys $writes --cache $cache --cache-size $size --requests $reads --distribution $dist --rtt 60 --zipf-param $zipf &
             pid=$!
             while true; do
                 sleep 5;
