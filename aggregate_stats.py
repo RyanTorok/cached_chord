@@ -7,9 +7,9 @@ for line in raw_lines:
     (node_id, latency, n_reads, cache_type, cache_size, distribution) = line.split(",")
     key = (n_reads, cache_type, cache_size, distribution)
     if key not in stats:
-        stats[key] = (int(latency), 1)
+        stats[key] = (float(latency), 1)
     else:
         (total, count) = stats[key]
-        stats[key] = (total + int(latency), count + 1)
+        stats[key] = (total + float(latency), count + 1)
 for ((n_reads, cache_type, cache_size, distribution), (total, count)) in stats.items():
     out.write("<{}, {}, {}, {}, {}>\n".format(str(total / count), str(n_reads), str(cache_type), str(cache_size), str(distribution)))

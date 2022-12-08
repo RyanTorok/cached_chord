@@ -28,7 +28,7 @@ pub enum MessageContent {
     SuccessorHeartbeat,
     SuccessorHeartbeatAck,
     SuccessorHeartbeatNewSuccessor(NodeId, Address),
-    HeartbeatTimerExpired,
+    HeartbeatTimerExpired(bool),
     FixFingerTimerExpired(NodeId),
 }
 

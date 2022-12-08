@@ -7,7 +7,8 @@ for dist in uniform zipf; do
         for size in 10 20 50 100 200; do
             touch $donefile
             #echo "$dist $cache $size"
-            timeout 4000 cargo run --release -- -n $nodes --keys $writes --cache $cache --cache-size $size --requests $reads --distribution $dist --rtt 60 &
+            killall chord;
+            timeout 500 cargo run --release -- -n $nodes --keys $writes --cache $cache --cache-size $size --requests $reads --distribution $dist --rtt 60 &
             pid=$!
             while true; do
                 sleep 5;

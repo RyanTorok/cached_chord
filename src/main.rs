@@ -129,7 +129,7 @@ async fn main() {
     let clone_inbox_2 = inbox.clone();
     tokio::spawn(run_inbox(inbox, ip));
     tokio::spawn(run_outbox(outbox, args.verbose));
-    tokio::spawn(send_heartbeat_triggers(clone_inbox, HEARTBEAT_INTERVAL));
+    tokio::spawn(send_heartbeat_triggers(clone_inbox, HEARTBEAT_INTERVAL, args.n == MASTER_NODE));
     tokio::spawn(send_fix_fingers_triggers(clone_inbox_2, FIX_FINGER_INTERVAL));
     tokio::spawn(run_node(r, activation, args.keys, args.cache.to_string(), args.cache_size, args.index, args.total)).await.expect("Error: run_node should never return.");
 }

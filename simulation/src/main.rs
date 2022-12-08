@@ -58,8 +58,8 @@ fn main() {
     }
     let cap_err = "Sim error: `usize` should not be smaller than u32.";
     let mut rand = rand::thread_rng();
-    let mut rand_indices = sample(&mut rand, u32::MAX.try_into().expect(cap_err), (args.n - 1).try_into().unwrap()).into_vec();
-    rand_indices.sort_unstable();
+    let rand_indices = sample(&mut rand, u32::MAX.try_into().expect(cap_err), (args.n - 1).try_into().unwrap()).into_vec();
+    //rand_indices.sort_unstable();
     let mut rand_indices = rand_indices.iter();
     let local = Local::now();
     let out_dir = format!("sim_{}", local.format("%Y-%m-%d %H:%M:%S").to_string());

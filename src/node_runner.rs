@@ -115,7 +115,7 @@ pub async fn run_requests(
         split_u64(u64::from_le_bytes(key_buf))
     };
 
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_secs(100)).await;
 
     //println!("Starting write requests!");
     // Execute writes
@@ -128,7 +128,7 @@ pub async fn run_requests(
         ).await.expect("Tokio send error when sending the client write request.");
     }
 
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
     //println!("Starting read requests!");
     // Execute reads
     for request_id in 0..n_reads {
@@ -155,6 +155,7 @@ pub async fn run_requests(
         } else {
             Duration::from_secs(120)
         };
+        let mut csv = std::fs::OpenOptions::new().create(true).write(true).append(true).open("raw_stats.csv").expect("Could not open csv file.");
         match tokio::time::timeout(timeout, rx.recv()).await {
             Ok(opt_req) => {
                 let (req, _value) = opt_req.expect("Tokio receive error on read response.");
@@ -164,6 +165,8 @@ pub async fn run_requests(
                     if request_id >= 5 {
                         latency_stats.0 += latency;
                         latency_stats.1 += 1;
+                        let stats = format!("<{}, {:.2}, {}, {}, {}, {}>\n", node_id, latency, n_reads, cache_type, cache_size, dist.to_string(zipf_param));
+                        csv.write_all(stats.as_bytes()).expect("Could not write to csv file.");
                     }
                 } else {
                     // old one that took too long
@@ -171,6 +174,7 @@ pub async fn run_requests(
             }
             Err(e) => {
                 // timeout
+                eprintln!("Timeout on request {}", request_id);
             }
         }
         //println!("Read request {} returned in {:.2} ms.", request_id, latency);
@@ -201,12 +205,27 @@ pub async fn run_requests(
     done_file.write("done!\n".as_bytes()).expect("Could not write to done.txt");
 }
 
-pub async fn send_heartbeat_triggers(inbox: Sender<ChordMessage>, interval: Duration) {
-    let mut timer = tokio::time::interval(interval);
+pub async fn send_heartbeat_triggers(inbox: Sender<ChordMessage>, interval: Duration, is_master: bool) {
+    let mut ticks = 0;
+    let mut timer = tokio::time::interval(interval.div_f64(
+        // Give the master time to send out response while other nodes aggressively try to update their successors.
+        if is_master {
+            1.0
+        }    else {
+            1.0
+        }
+    ));
+    while ticks < 3000 {
+        timer.tick().await;
+        inbox.send(ChordMessage::new((u32::MAX, Default::default()), Default::default(), MessageContent::HeartbeatTimerExpired(ticks % 50 == 0))).await
+            .expect("Error: Could not send HeartbeatTimerExpired message to inbox.");
+        ticks += 1;
+    }
+    timer = tokio::time::interval(interval);
     loop {
         timer.tick().await;
         // Don't need to fill src/dest information because this message is internal.
-        inbox.send(ChordMessage::new((u32::MAX, Default::default()), Default::default(), MessageContent::HeartbeatTimerExpired)).await
+        inbox.send(ChordMessage::new((u32::MAX, Default::default()), Default::default(), MessageContent::HeartbeatTimerExpired(false))).await
             .expect("Error: Could not send HeartbeatTimerExpired message to inbox.");
     }
 }
@@ -634,15 +653,17 @@ pub async fn run_node(
                         //println!("Changing successor from {} to {}.", r.node.successor().map_or_else(|| String::from("nothing"), |(a, b)| a.to_string()), s_node);
                         r.node.set_successor((s_node, s_addr))
                     }
-                    MessageContent::HeartbeatTimerExpired => {
+                    MessageContent::HeartbeatTimerExpired(skip_master) => {
                         if r.verbose {
                             r.node.print_status();
                         }
                         let opt_successor = r.node.successor();
-                        if let Some((_s_node, s_addr)) = opt_successor {
-                            let src = r.node.msg_id();
-                            if let Err(e) = r.outgoing.send(ChordMessage::new(src, s_addr, MessageContent::SuccessorHeartbeat)).await {
-                                eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
+                        if let Some((s_node, s_addr)) = opt_successor {
+                            if !skip_master || s_node != MASTER_NODE {
+                                let src = r.node.msg_id();
+                                if let Err(e) = r.outgoing.send(ChordMessage::new(src, s_addr, MessageContent::SuccessorHeartbeat)).await {
+                                    eprintln!("Error: Could not send SuccessorHeartbeatAck message because of error '{}'", e);
+                                }
                             }
                         }
                     }
