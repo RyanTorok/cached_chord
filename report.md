@@ -332,3 +332,7 @@ gains through caching. As existing peer-to-peer systems like IPFS
 continue to struggle with performace, we would like to see others
 examine how to make DHTs more performant in order to allow more
 practical decentralized applications in the future.
+
+## Acknowledgements
+
+The Chord diagrams we included were originally featured in [Wyatt Lloyd's Distributed Systems course](https://www.cs.princeton.edu/courses/archive/fall22/cos418/docs/precept_05_bayouchord.pdf).
